@@ -1,0 +1,20 @@
+# No patient data of any kind belongs in this repository.
+Videos/
+*.mp4
+*.mov
+*.avi
+*.json
+*.xlsx
+*.xls
+*.csv
+*.png
+*.jpg
+*.jpeg
+*.tiff
+
+# OS / editor
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
