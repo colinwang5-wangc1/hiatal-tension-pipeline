@@ -89,7 +89,8 @@ def main():
             print(f"  {arm_name}: no data")
             continue
 
-        # Filter to only rows with actual force readings (y > 0) and an instrument
+        # Filter to rows with an instrument docked, for the diagnostic summary below
+        # (does not filter on force value — zeros are kept in the saved output)
         df_active = df[df["Instrument"] != ""].copy()
 
         print(f"\n  {arm_name}: {len(df)} total entries, {len(df_active)} with instrument active")

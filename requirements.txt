@@ -1,6 +1,10 @@
 opencv-python
-pytesseract
-Pillow
 pandas
 openpyxl
 numpy
+matplotlib
+scipy
+
+# macOS only — required by verify_force.py (OCR via Apple's Vision framework)
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+pyobjc-framework-Vision; sys_platform == "darwin"
