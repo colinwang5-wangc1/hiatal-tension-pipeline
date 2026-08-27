@@ -27,7 +27,7 @@ captured during the procedure.
 ## Getting the input data
 
 Force data is obtained from the da Vinci console's companion web interface,
-which serves a per-case JSON blob containing millisecond-precise force
+which serves a per-case JSON blob containing per-second (~1 Hz) force
 readings for each instrument arm. To obtain this file for a given case:
 
 1. Create the case's working directory: `mkdir -p Videos/<case_id>/force_data`
