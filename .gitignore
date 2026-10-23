@@ -18,3 +18,11 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+
+# Python environments and generated files
+.venv/
+venv/
+*.npz
+*.npy
+*.bak
+*.tmp

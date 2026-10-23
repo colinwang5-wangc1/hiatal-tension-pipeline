@@ -61,6 +61,10 @@ def parse_arm(arm_name: str, data: list) -> pd.DataFrame:
 
 
 def main():
+    if "--version" in sys.argv[1:]:
+        import framelib
+        print(f"{Path(__file__).name} {framelib.PIPELINE_VERSION}")
+        sys.exit(0)
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)

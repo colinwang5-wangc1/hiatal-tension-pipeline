@@ -8,23 +8,24 @@ Two modes:
     Step 2: Click two blood vessel landmarks → records distance in mm (ground truth)
     Usage: python3 calibrate_reference.py <image> <case_id>
 
-  LANDMARK-ONLY MODE (A-D clips, no ruler):
+  LANDMARK-ONLY MODE (a still from each point A-D, no ruler):
     Just click the two blood vessels. Uses the known landmark_mm from
     <case_id>_calibration.json to compute px/mm for this frame's depth.
-    Usage: python3 calibrate_reference.py <image> <case_id> <clip_label>
+    Usage: python3 calibrate_reference.py <image> <case_id> <point>
 
 Examples:
-    python3 calibrate_reference.py Videos/YV003/calibration_frame.png YV003
-    python3 calibrate_reference.py Videos/YV003/clips/A/frame_A_090.png YV003 A
-    python3 calibrate_reference.py Videos/YV003/clips/B/frame_B_manual.tiff YV003 B
+    python3 calibrate_reference.py Videos/<case_id>/calibration_frame.png <case_id>
+    python3 calibrate_reference.py Videos/<case_id>/point_A_still.png <case_id> A
+    python3 calibrate_reference.py Videos/<case_id>/point_B_still.tiff <case_id> B
+
+The plot window uses matplotlib's default interactive backend for your platform. Set the
+MPLBACKEND environment variable (for example TkAgg or QtAgg) to choose another.
 """
 
 import sys
 import json
 import numpy as np
 import cv2
-import matplotlib
-matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
 from matplotlib.widgets import TextBox
 from pathlib import Path
@@ -33,8 +34,16 @@ import openpyxl
 BASE         = Path(__file__).resolve().parent
 PATIENT_FILE = BASE / "Hiatal tension patients.xlsx"
 
-img_path   = sys.argv[1] if len(sys.argv) > 1 else str(BASE / "Videos/YV003/calibration_frame.png")
-case_id    = sys.argv[2] if len(sys.argv) > 2 else "YV003"
+if "--version" in sys.argv[1:]:
+    import framelib
+    print(f"{Path(__file__).name} {framelib.PIPELINE_VERSION}")
+    sys.exit(0)
+if len(sys.argv) < 3:
+    print(__doc__)
+    sys.exit(1)
+
+img_path   = sys.argv[1]
+case_id    = sys.argv[2]
 clip_label = sys.argv[3] if len(sys.argv) > 3 else None
 
 # Landmark-only mode if clip_label is provided

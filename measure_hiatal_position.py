@@ -16,23 +16,33 @@ Usage:
     python3 measure_hiatal_position.py <image> <case_id>
 
 Example:
-    python3 measure_hiatal_position.py Videos/YV003/calibration_frame.png YV003
+    python3 measure_hiatal_position.py Videos/<case_id>/calibration_frame.png <case_id>
+
+The plot window uses matplotlib's default interactive backend for your platform. Set the
+MPLBACKEND environment variable (for example TkAgg or QtAgg) to choose another.
 """
 
 import sys
 import json
 import numpy as np
 import cv2
-import matplotlib
-matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 
 BASE     = Path(__file__).resolve().parent
-img_path = sys.argv[1] if len(sys.argv) > 1 else "Videos/YV003/calibration_frame.png"
-case_id  = sys.argv[2] if len(sys.argv) > 2 else "YV003"
+
+if "--version" in sys.argv[1:]:
+    import framelib
+    print(f"{Path(__file__).name} {framelib.PIPELINE_VERSION}")
+    sys.exit(0)
+if len(sys.argv) < 3:
+    print(__doc__)
+    sys.exit(1)
+
+img_path = sys.argv[1]
+case_id  = sys.argv[2]
 
 # Load calibration (px/mm from base calibration)
 cal_path = BASE / "Videos" / case_id / "force_data" / f"{case_id}_calibration.json"

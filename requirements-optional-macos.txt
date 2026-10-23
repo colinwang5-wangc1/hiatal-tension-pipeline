@@ -1,0 +1,5 @@
+# Optional, macOS only. Needed only by verify_force.py (OCR of a screen recording with Apple's Vision
+# framework). Nothing else in the pipeline uses these. Install after requirements.txt:
+#     pip install -r requirements-optional-macos.txt
+pyobjc-framework-Cocoa
+pyobjc-framework-Vision

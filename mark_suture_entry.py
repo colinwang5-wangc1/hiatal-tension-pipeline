@@ -1,338 +1,422 @@
 """
-mark_suture_entry.py — Manually mark suture entry points at 1-second intervals.
+mark_suture_entry.py — Manually mark the crural entry points on every video frame
+that could correspond to each force sample, so the distance at each force second
+comes with an uncertainty instead of resting on one frame.
 
-Steps through a clip at 1-second intervals (matching force data resolution).
-On each frame, click the LEFT crus entry point then the RIGHT crus entry point.
-Press SPACE to skip a frame (e.g. if occluded). Press Q to quit early.
+For every selected force second (window and buffer rows from extract_point_forces.py), frames
+are chosen around it by their true timestamps (see framelib.py): the centre frame is the one whose
+stored timestamp is nearest the force second (+ time offsets), and the sampled frames are that frame
+plus a set of frame offsets (the layout and stride set by plan_measurements.py). Each distinct
+raw frame is marked once, even when neighbouring force seconds share it. Frames are decoded exactly
+from the RAW video; the time shown on screen is the frame's stored timestamp. The title also says
+whether each force second is a window row or a buffer row.
 
-Results saved to:
-    Videos/<case_id>/force_data/<case_id>_suture_entry.json
-    Videos/<case_id>/force_data/<case_id>_suture_entry.xlsx
+On each frame: click the LEFT crus entry point, then the RIGHT crus entry point.
+The mark is saved at once. Marks are keyed by raw frame number, so a later run with a
+denser stride only adds the frames not yet marked.
+
+Keys
+    click      left crus, then right crus   (a third click on a marked frame is ignored)
+    u          undo the last click (or the last mark)
+    r          redo: clear this frame and mark it again
+    x          skip: frame unusable (occluded); excluded from the statistics
+    ->  / space / <-   next / previous frame (nothing is recorded or lost)
+    n          jump to the next frame that is not marked or skipped
+    g          show / hide the previous marked frame's points as faint "ghosts"
+    q          quit (everything is already saved)
+
+Needs, in this order:
+    index_video.py             the frame table of the video
+    extract_point_forces.py    the force samples to measure
+    plan_measurements.py       the stride for each point (the measurement plan)
+    calibrate_reference.py <still.png> <case_id> <point>    px/mm for the point
+
+Results (new files; nothing existing is overwritten):
+    Videos/<case_id>/force_data/<case_id>_frame_marks.json   per-frame marks + parameters
 
 Usage:
-    python3 mark_suture_entry.py <video.mp4> <case_id> <clip_label>
+    python3 mark_suture_entry.py <video.mp4> <case_id> <point> [options]
 
-Examples:
-    python3 mark_suture_entry.py Videos/YV003/clips/A/YV003_A.mp4 YV003 A
-    python3 mark_suture_entry.py Videos/YV003/clips/B/YV003_B.mp4 YV003 B
+Options (the measurement plan supplies the defaults; options given here override it and are recorded):
+    --half-window-frames N   frames on each side of the centre frame
+    --stride N               spacing of sampled frames, in frames
+    --layout edge|centred    edge: -H,-H+s,..  centred: 0,+/-s,..
+    --time-offset-s S        video time minus force time (clock offset)
+    --window-center-shift-s S  shift the window centre (sample = bin start?)
+    --list                   print the frame plan and progress, then exit
+    --verify                 re-decode this point's marked frames and check their CRCs
+    --no-ghost               start with ghost marks hidden
+
+Example:
+    python3 mark_suture_entry.py Videos/<case_id>/<video file>.mp4 <case_id> A
 """
 
-import sys
+import argparse
 import json
-import numpy as np
-import cv2
-import matplotlib
-matplotlib.use("MacOSX")
-import matplotlib.pyplot as plt
+import sys
 from pathlib import Path
-import openpyxl
+
+import numpy as np
+
+import framelib as fl
 
 BASE = Path(__file__).resolve().parent
 
-video_path = sys.argv[1] if len(sys.argv) > 1 else None
-case_id    = sys.argv[2] if len(sys.argv) > 2 else "YV003"
-clip_label = sys.argv[3] if len(sys.argv) > 3 else None
 
-if not video_path or not clip_label:
-    print(__doc__)
-    sys.exit(1)
+# ---------------------------------------------------------------- inputs --------
 
-# Load clip calibration
-cal_path = BASE / "Videos" / case_id / "force_data" / f"{case_id}_{clip_label}_calibration.json"
-if not cal_path.exists():
-    print(f"ERROR: Calibration file not found: {cal_path}")
-    sys.exit(1)
-
-with open(cal_path) as f:
-    cal = json.load(f)
-px_per_mm = cal["px_per_mm"]
-print(f"Loaded calibration for clip {clip_label}: {px_per_mm:.2f} px/mm")
-
-def ts_to_secs(ts):
-    if not ts: return None
-    parts = str(ts).split(":")
-    return int(parts[0])*3600 + int(parts[1])*60 + float(parts[2])
-
-def secs_to_ts(s):
-    h = int(s // 3600)
-    m = int((s % 3600) // 60)
-    sec = s % 60
-    return f"{h:02d}:{m:02d}:{sec:06.3f}"
-
-# Prefer full timestamped video for frame-accurate seeking (abs_sec * fps directly)
-full_video = BASE / "Videos" / case_id / f"{case_id}_full_timestamped.mp4"
-if full_video.exists():
-    seek_video = str(full_video)
-    use_full_video = True
-    print(f"Using full timestamped video for frame-accurate seeking: {full_video.name}")
-else:
-    seek_video = video_path
-    use_full_video = False
-    print(f"Full timestamped video not found — using clip with offset seek")
-
-cap   = cv2.VideoCapture(seek_video)
-fps   = cap.get(cv2.CAP_PROP_FPS)
-total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-duration = total / fps
-
-frames = {}  # abs_sec -> (frame_img, absolute_timestamp)
-
-# Load clip start time (used only as fallback)
-wb_pat = openpyxl.load_workbook(BASE / "Hiatal tension patients.xlsx")
-ws_pat = wb_pat.active
-headers = [cell.value for cell in ws_pat[1]]
-col = {h: i for i, h in enumerate(headers)}
-
-clip_start_ts = None
-for row in ws_pat.iter_rows(min_row=2, values_only=True):
-    if row[col["Study ID"]] == case_id:
-        clip_start_ts = row[col[f"Point {clip_label} start"]]
-        break
-
-start_secs = ts_to_secs(str(clip_start_ts)) if clip_start_ts else 0.0
-print(f"Clip {clip_label} window starts at {secs_to_ts(start_secs)}")
-
-# Load force timestamps for this clip from points ABCD Excel
-force_xlsx = BASE / "Videos" / case_id / "force_data" / f"{case_id}_points_ABCD_force.xlsx"
-force_timestamps = []
-
-if force_xlsx.exists():
-    wb_force = openpyxl.load_workbook(force_xlsx)
-    sheet_name = f"Point {clip_label}"
-    if sheet_name in wb_force.sheetnames:
-        ws_force = wb_force[sheet_name]
-        force_headers = [cell.value for cell in ws_force[1]]
-        in_window_col = force_headers.index("In Window")
-        for row in ws_force.iter_rows(min_row=2, values_only=True):
-            abs_sec = row[1]  # "Seconds" column
-            in_window = row[in_window_col]
-            if abs_sec is not None and in_window == "YES":
-                force_timestamps.append(float(abs_sec))
-        print(f"Found {len(force_timestamps)} force timestamps for clip {clip_label}")
-    else:
-        print(f"WARNING: Sheet '{sheet_name}' not found in {force_xlsx.name}")
-
-if not force_timestamps:
-    print("WARNING: No force timestamps found — falling back to 1-second intervals from clip start")
-    force_timestamps = [start_secs + i for i in range(int(np.ceil(duration)) + 1)]
-
-# Extract frames at force timestamps
-for abs_sec in sorted(force_timestamps):
-    if use_full_video:
-        frame_num = int(abs_sec * fps)  # direct seek — no clip offset error
-    else:
-        frame_num = int((abs_sec - start_secs) * fps)
-    if frame_num < 0 or frame_num >= total:
-        continue
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-    ret, frame = cap.read()
-    if ret:
-        frames[abs_sec] = (cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), abs_sec)
-cap.release()
-
-print(f"Extracted {len(frames)} frames matching force data timestamps")
-
-# --- Interactive marking ---
-results = {}  # abs_sec -> {left, right, distance_px, distance_mm, timestamp}
-frame_keys = sorted(frames.keys())
-current_idx = [0]
-frame_clicks = [[]]  # clicks for current frame
-
-fig = plt.figure(figsize=(13, 10))
-ax  = fig.add_axes([0, 0, 1, 1])
-ax.axis("off")
-
-info_text = ax.text(10, 10, "", fontsize=11, color="white", va="top",
-                    bbox=dict(facecolor="black", alpha=0.7))
-
-img_display = [None]
-instruction_text = [None]  # persistent reference so onclick can update it
-
-def show_frame(idx):
-    ax.cla()
-    ax.axis("off")
-    abs_sec = frame_keys[idx]
-    frame_img, _ = frames[abs_sec]
-    ax.imshow(frame_img)
-    img_display[0] = frame_img
-
-    n_done = len(results)
-    n_total = len(frame_keys)
-    ax.set_title(
-        f"Clip {clip_label}  |  Frame {idx+1}/{n_total}  |  t={secs_to_ts(abs_sec)}  |  "
-        f"Done: {n_done}/{n_total}  |  SPACE=skip  ←/→=navigate  Q=quit",
-        fontsize=12, color="white",
-        bbox=dict(boxstyle="round", facecolor="#333333", alpha=0.85))
-
-    if abs_sec in results:
-        r = results[abs_sec]
-        pl, pr = r["left_crus_px"], r["right_crus_px"]
-        ax.plot(pl[0], pl[1], "+", color="#00FF88", markersize=14, markeredgewidth=2)
-        ax.plot(pr[0], pr[1], "+", color="#FF6600", markersize=14, markeredgewidth=2)
-        ax.plot([pl[0], pr[0]], [pl[1], pr[1]], "--", color="white", linewidth=1.5, alpha=0.8)
-        ax.text((pl[0]+pr[0])//2, (pl[1]+pr[1])//2 - 15,
-                f"{r['distance_mm']:.2f} mm",
-                color="white", fontsize=9, ha="center",
-                bbox=dict(facecolor="black", alpha=0.6))
-        instruction_text[0] = ax.text(10, frame_img.shape[0] - 10,
-                "Already marked — click to re-mark or press SPACE/→ to continue",
-                fontsize=10, color="yellow", va="bottom",
-                bbox=dict(facecolor="black", alpha=0.6))
-    else:
-        n_clicks = len(frame_clicks[0])
-        msg = "Click 1/2: LEFT crus suture entry point" if n_clicks == 0 else "Click 2/2: RIGHT crus suture entry point"
-        instruction_text[0] = ax.text(10, frame_img.shape[0] - 10, msg, fontsize=11,
-                color="white", va="bottom", bbox=dict(facecolor="black", alpha=0.6))
-
-    fig.canvas.draw()
+def force_rows(case_id, label):
+    """[(force second, role)] to measure for this point (from extract_point_forces.py)."""
+    path = BASE / "Videos" / case_id / "force_data" / f"{case_id}_points_ABCD_force.xlsx"
+    if not path.exists():
+        sys.exit(f"ERROR: {path.name} not found - run extract_point_forces.py first")
+    rows, legacy = fl.selected_force_rows(path, label)
+    if legacy:
+        print("NOTE: the force workbook has no Role column (made by an older extraction), so only its 'In Window' "
+              "rows are measured. Re-run extract_point_forces.py to include the buffer rows.")
+    if not rows:
+        sys.exit(f"ERROR: no force rows to measure for point {label} in {path.name}")
+    return sorted(rows)
 
 
-def onclick(event):
-    if event.xdata is None or event.ydata is None:
-        return
-    idx = current_idx[0]
-    abs_sec = frame_keys[idx]
-    x, y = int(event.xdata), int(event.ydata)
+def load_px_per_mm(case_id, label):
+    path = BASE / "Videos" / case_id / "force_data" / f"{case_id}_{label}_calibration.json"
+    if not path.exists():
+        sys.exit(f"ERROR: calibration file not found: {path}\n"
+                 f"       make it with: python3 calibrate_reference.py <still.png> {case_id} {label}")
+    with open(path) as f:
+        return float(json.load(f)["px_per_mm"])
 
-    # If already marked, clear and re-mark
-    if abs_sec in results and len(frame_clicks[0]) == 0:
-        del results[abs_sec]
-        show_frame(idx)
-        return
 
-    frame_clicks[0].append((x, y))
-    color = "#00FF88" if len(frame_clicks[0]) == 1 else "#FF6600"
-    ax.plot(x, y, "+", color=color, markersize=14, markeredgewidth=2)
+# --------------------------------------------------------------- session --------
 
-    # Update bottom instruction text after first click
-    if len(frame_clicks[0]) == 1 and instruction_text[0] is not None:
-        instruction_text[0].set_text("Click 2/2: RIGHT crus suture entry point")
+class MarkSession:
+    """Marking state for one point. No display code: every action autosaves."""
 
-    fig.canvas.draw()
+    def __init__(self, store, label, plan, px_per_mm, index, get_frame=None, roles=None):
+        self.store, self.label, self.plan, self.px_per_mm = store, label, plan, px_per_mm
+        self.index = index
+        self.get_frame = get_frame            # k -> RGB array (only needed to store a CRC)
+        self.roles = roles or {}              # force second -> window | buffer-before | buffer-after
+        self.order = plan.frames
+        self.clicks = []
+        self.pos = 0
+        self.message = ""
+        self.go_to_next_unmarked(include_current=True)
 
-    if len(frame_clicks[0]) == 2:
-        p_left, p_right = frame_clicks[0]
-        px_dist = np.sqrt((p_right[0]-p_left[0])**2 + (p_right[1]-p_left[1])**2)
-        mm_dist = px_dist / px_per_mm
+    # -- state
+    @property
+    def frame(self):
+        return self.order[self.pos]
 
-        ax.plot([p_left[0], p_right[0]], [p_left[1], p_right[1]],
-                "--", color="white", linewidth=1.5, alpha=0.8)
-        mid_x = (p_left[0] + p_right[0]) // 2
-        mid_y = (p_left[1] + p_right[1]) // 2 - 15
-        ax.annotate(f"{mm_dist:.2f} mm", (mid_x, mid_y), color="white", fontsize=10,
-                    ha="center", bbox=dict(facecolor="black", alpha=0.7))
-        ax.set_title(
-            f"Clip {clip_label}  |  t={secs_to_ts(abs_sec)}  |  {mm_dist:.2f} mm  — press SPACE to confirm, click to redo",
-            fontsize=12, color="white",
-            bbox=dict(boxstyle="round", facecolor="#1a5276", alpha=0.85))
-        fig.canvas.draw()
+    def record(self, k=None):
+        return self.store.get(self.label, self.frame if k is None else k)
 
-        results[abs_sec] = {
-            "timestamp":     secs_to_ts(abs_sec),
-            "abs_seconds":   round(abs_sec, 3),
-            "left_crus_px":  list(p_left),
-            "right_crus_px": list(p_right),
-            "distance_px":   round(px_dist, 2),
-            "distance_mm":   round(mm_dist, 4),
+    def is_marked(self, k=None):
+        r = self.record(k)
+        return r is not None and not r.get("skipped")
+
+    def is_skipped(self, k=None):
+        r = self.record(k)
+        return r is not None and bool(r.get("skipped"))
+
+    def counts(self):
+        return self.store.counts(self.label, self.order)
+
+    def ghost(self):
+        """The nearest earlier marked frame's record, for the faint reference points."""
+        for p in range(self.pos - 1, -1, -1):
+            r = self.record(self.order[p])
+            if r is not None and not r.get("skipped"):
+                return self.order[p], r
+        return None
+
+    # -- actions
+    def click(self, x, y):
+        k = self.frame
+        if self.is_marked():
+            self.message = "Frame already marked - press r to redo it"
+            return False
+        if self.is_skipped():
+            self.store.delete(self.label, k)
+            self.store.save()
+        self.clicks.append((round(float(x), 1), round(float(y), 1)))
+        if len(self.clicks) == 2:
+            self._store_mark(k)
+        return True
+
+    def _store_mark(self, k):
+        (lx, ly), (rx, ry) = self.clicks
+        d_px = float(np.hypot(rx - lx, ry - ly))
+        rec = {
+            "pts_s": round(float(self.index.pts_s[k]), 6),
+            "left_crus_px": [lx, ly], "right_crus_px": [rx, ry],
+            "distance_px": round(d_px, 2), "distance_mm": round(d_px / self.px_per_mm, 4),
+            "px_per_mm": self.px_per_mm, "skipped": False, "source": "manual",
+            "marked_at": fl.utc_now(),
         }
-        print(f"  t={secs_to_ts(abs_sec)}  {px_dist:.0f}px = {mm_dist:.2f}mm  [press SPACE to confirm]")
+        if self.get_frame is not None:
+            rec["frame_crc32"] = fl.frame_crc32(self.get_frame(k))
+        self.store.put(self.label, k, rec)
+        self.store.save()
+        self.clicks = []
+        self.message = f"saved {rec['distance_mm']:.2f} mm"
 
-        frame_clicks[0] = []
+    def undo(self):
+        k = self.frame
+        if self.clicks:
+            self.clicks.pop()
+        elif self.is_marked():
+            r = self.record()
+            self.store.delete(self.label, k)
+            self.store.save()
+            self.clicks = [tuple(r["left_crus_px"])]
+        elif self.is_skipped():
+            self.store.delete(self.label, k)
+            self.store.save()
+
+    def redo(self):
+        self.clicks = []
+        if self.record() is not None:
+            self.store.delete(self.label, self.frame)
+            self.store.save()
+
+    def skip(self):
+        k = self.frame
+        if self.is_marked():
+            self.message = "Frame is marked - press r (redo) to clear it before skipping"
+            return
+        self.clicks = []
+        self.store.put(self.label, k, {"pts_s": round(float(self.index.pts_s[k]), 6), "skipped": True,
+                                       "source": "manual", "marked_at": fl.utc_now()})
+        self.store.save()
+        self.step(+1)
+
+    def step(self, delta):
+        self.clicks = []
+        self.pos = int(min(max(self.pos + delta, 0), len(self.order) - 1))
+
+    def go_to_next_unmarked(self, include_current=False):
+        start = self.pos if include_current else self.pos + 1
+        for p in list(range(start, len(self.order))) + list(range(0, start)):
+            if self.record(self.order[p]) is None:
+                self.pos, self.clicks = p, []
+                return True
+        return False
+
+    def describe(self, k):
+        t = self.index.pts_s[k]
+        mem = ", ".join(
+            f"force s {s:.0f}{' (' + self.roles[s] + ')' if s in self.roles else ''}: {o:+d} f ({ms:+.1f} ms)"
+            for s, o, ms in self.plan.membership[k])
+        return f"frame {k}  video time {fl.fmt_time(t)}  |  {mem}"
 
 
-def onkey(event):
-    idx = current_idx[0]
-    abs_sec = frame_keys[idx]
+# --------------------------------------------------------------- actions --------
 
-    if event.key == " " or event.key == "right":
-        # Confirm marked frame and advance, or skip unmarked frame
-        frame_clicks[0] = []
-        if abs_sec in results:
-            print(f"  Confirmed t={secs_to_ts(abs_sec)}")
+def print_plan(params, plan, store, label, roles=None):
+    roles = roles or {}
+    marked, skipped, remaining = store.counts(label, plan.frames)
+    print(f"Point {label}: {len(plan.samples)} force seconds, {len(plan.frames)} distinct frames to measure "
+          f"(marked {marked}, skipped {skipped}, remaining {remaining})")
+    print(f"  parameters: {json.dumps(params)}")
+    for x, (centre, frames) in plan.samples.items():
+        role = f" [{roles[x]}]" if x in roles else ""
+        if centre is None:
+            print(f"  force s {x:.3f}{role}: outside the video")
+            continue
+        offs = " ".join(f"{sf.offset_frames:+d}" for sf in frames)
+        print(f"  force s {x:.3f}{role}: centre frame {centre}  offsets [{offs}]  "
+              f"(first {frames[0].offset_ms:+.1f} ms, last {frames[-1].offset_ms:+.1f} ms)")
+
+
+def verify_marks(store, label, plan, reader):
+    bad = checked = 0
+    for k in plan.frames:
+        r = store.get(label, k)
+        if r is None or r.get("skipped") or "frame_crc32" not in r:
+            continue
+        checked += 1
+        if fl.frame_crc32(reader.get(k)) != r["frame_crc32"]:
+            bad += 1
+            print(f"  MISMATCH frame {k}")
+    print(f"Verified {checked} marked frames of point {label}: {bad} mismatches")
+    return bad == 0
+
+
+# ------------------------------------------------------------------- GUI --------
+
+def run_gui(session, reader, label, show_ghost=True):
+    import matplotlib.pyplot as plt
+
+    plt.rcParams["toolbar"] = "None"
+    for key in list(plt.rcParams):           # keep matplotlib's own shortcuts from stealing our keys
+        if key.startswith("keymap."):
+            plt.rcParams[key] = []
+
+    fig = plt.figure(figsize=(12.5, 10))
+    ax = fig.add_axes([0, 0, 1, 1])
+    state = {"ghost": show_ghost, "done": False}
+
+    def draw():
+        ax.cla()
+        ax.axis("off")
+        k = session.frame
+        try:
+            img = reader.get(k)
+        except RuntimeError as e:
+            ax.text(0.5, 0.5, str(e), transform=ax.transAxes, color="red", ha="center")
+            fig.canvas.draw_idle()
+            return
+        ax.imshow(img)
+        marked, skipped, remaining = session.counts()
+        head = (f"Point {label}  |  frame {session.pos + 1}/{len(session.order)}  |  "
+                f"marked {marked}  skipped {skipped}  left {remaining}")
+        ax.text(10, 10, head + "\n" + session.describe(k), fontsize=11, color="white", va="top",
+                bbox=dict(facecolor="black", alpha=0.75))
+        r = session.record()
+        if state["ghost"] and r is None:
+            g = session.ghost()
+            if g is not None:
+                gk, gr = g
+                for pt, col in ((gr["left_crus_px"], "#00FF88"), (gr["right_crus_px"], "#FF6600")):
+                    ax.plot(pt[0], pt[1], "o", mfc="none", mec=col, ms=16, mew=1.5, alpha=0.55)
+                ax.text(10, img.shape[0] - 40, f"ghost = marks from frame {gk}", color="#cccccc",
+                        fontsize=9, va="bottom", bbox=dict(facecolor="black", alpha=0.5))
+        if r is not None and not r.get("skipped"):
+            pl, pr = r["left_crus_px"], r["right_crus_px"]
+            ax.plot(pl[0], pl[1], "+", color="#00FF88", ms=14, mew=2)
+            ax.plot(pr[0], pr[1], "+", color="#FF6600", ms=14, mew=2)
+            ax.plot([pl[0], pr[0]], [pl[1], pr[1]], "--", color="white", lw=1.5, alpha=0.8)
+            ax.text((pl[0] + pr[0]) / 2, (pl[1] + pr[1]) / 2 - 15, f"{r['distance_mm']:.2f} mm",
+                    color="white", fontsize=10, ha="center", bbox=dict(facecolor="black", alpha=0.7))
+            status = "MARKED  (r = redo, u = undo, -> = next)"
+        elif r is not None:
+            status = "SKIPPED as unusable  (click to mark it after all)"
         else:
-            print(f"  Skipped t={secs_to_ts(abs_sec)}")
-        if idx + 1 < len(frame_keys):
-            current_idx[0] += 1
-            show_frame(current_idx[0])
-        else:
-            finish()
-    elif event.key == "left":
-        frame_clicks[0] = []
-        if idx > 0:
-            current_idx[0] -= 1
-            show_frame(current_idx[0])
-    elif event.key == "q":
-        finish()
+            for i, (x, y) in enumerate(session.clicks):
+                ax.plot(x, y, "+", color="#00FF88" if i == 0 else "#FF6600", ms=14, mew=2)
+            status = "Click 1/2: LEFT crus entry point" if not session.clicks else "Click 2/2: RIGHT crus entry point"
+        ax.text(10, img.shape[0] - 10, f"{status}   |   {session.message}", fontsize=11, color="white",
+                va="bottom", bbox=dict(facecolor="black", alpha=0.7))
+        fig.canvas.draw_idle()
+
+    def on_click(event):
+        if event.inaxes is not ax or event.xdata is None:
+            return
+        session.message = ""
+        session.click(event.xdata, event.ydata)
+        draw()
+
+    def on_key(event):
+        session.message = ""
+        key = event.key
+        if key in (" ", "right"):
+            session.step(+1)
+        elif key == "left":
+            session.step(-1)
+        elif key == "u":
+            session.undo()
+        elif key == "r":
+            session.redo()
+        elif key == "x":
+            session.skip()
+        elif key == "n":
+            if not session.go_to_next_unmarked():
+                session.message = "every frame is marked or skipped"
+        elif key == "g":
+            state["ghost"] = not state["ghost"]
+        elif key == "q":
+            plt.close(fig)
+            return
+        draw()
+
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    try:
+        plt.get_current_fig_manager().full_screen_toggle()
+    except Exception:
+        pass
+    draw()
+    plt.show()
 
 
-finished = [False]
+# ------------------------------------------------------------------ main --------
 
-def finish():
-    if finished[0]:
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="Mark crural entry points on every frame around each force sample.")
+    ap.add_argument("video")
+    ap.add_argument("case_id")
+    ap.add_argument("point")
+    ap.add_argument("--half-window-frames", dest="half_window_frames", type=int)
+    ap.add_argument("--stride", type=int)
+    ap.add_argument("--layout", choices=["edge", "centred"])
+    ap.add_argument("--time-offset-s", dest="time_offset_s", type=float)
+    ap.add_argument("--window-center-shift-s", dest="window_center_shift_s", type=float)
+    ap.add_argument("--list", action="store_true")
+    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--no-ghost", action="store_true")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {fl.PIPELINE_VERSION}")
+    return ap.parse_args(argv)
+
+
+def prepare(video, case_id, label, overrides=None):
+    """Everything a marking session needs for one point: the frame table, the marks store, the sampling
+    parameters (command line > measurement plan > this point's previous run > defaults), the frame plan
+    and the role of each force second. Stops with a clear message if an earlier stage has not been run."""
+    force_dir = BASE / "Videos" / case_id / "force_data"
+    index = fl.load_index(force_dir, case_id, video)
+    measurement_plan = fl.load_plan(force_dir, case_id)
+    if measurement_plan is None:
+        sys.exit(f"ERROR: no measurement plan - run plan_measurements.py {case_id} first")
+    store = fl.MarksStore(force_dir / f"{case_id}_frame_marks.json", case_id)
+    prev = store.data.get("video")
+    if prev and prev.get("frames") not in (None, index.n):
+        sys.exit(f"ERROR: existing marks were made on a video with {prev['frames']} frames, this one has "
+                 f"{index.n}. Use a different case folder or move the old marks.")
+    given = {k: v for k, v in (overrides or {}).items() if v is not None}
+    params = fl.resolve_params(**{**(store.last_params(label) or {}), **fl.plan_point_params(measurement_plan, label),
+                                  **given})
+    rows = force_rows(case_id, label)
+    roles = {x: role for x, role in rows}
+    plan = fl.plan_point(index, [x for x, _ in rows], **params)
+    if not plan.frames:
+        sys.exit("ERROR: no frames fall inside the video for this point's force seconds")
+    return index, store, params, plan, roles
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    label = args.point.upper()
+    video = Path(args.video)
+    if not video.exists():
+        sys.exit(f"ERROR: video not found: {video}")
+
+    index, store, params, plan, roles = prepare(video, args.case_id, label,
+                                                {k: getattr(args, k) for k in fl.PARAM_DEFAULTS})
+    if args.list:
+        print_plan(params, plan, store, label, roles)
         return
-    finished[0] = True
-    print(f"\nMarked {len(results)}/{len(frame_keys)} frames")
-    save_results()
-    # Redraw last frame cleanly with all markers
-    show_frame(current_idx[0])
-    ax.set_title(f"Done — {len(results)} frames marked. Close window.",
-                 fontsize=13, color="white",
-                 bbox=dict(boxstyle="round", facecolor="#1e8449", alpha=0.8))
-    fig.canvas.draw()
+
+    px_per_mm = load_px_per_mm(args.case_id, label)
+    if args.verify:
+        with fl.FrameReader(video, index) as reader:
+            sys.exit(0 if verify_marks(store, label, plan, reader) else 1)
+
+    store.set_video(index)
+    store.note_params(label, params)
+    store.save()
+    print_plan(params, plan, store, label, roles)
+    print(f"Calibration: {px_per_mm:.4f} px/mm.  Marks are saved after every frame to {store.path.name}")
+
+    with fl.FrameReader(video, index) as reader:
+        session = MarkSession(store, label, plan, px_per_mm, index, get_frame=reader.get, roles=roles)
+        run_gui(session, reader, label, show_ghost=not args.no_ghost)
+
+    marked, skipped, remaining = store.counts(label, plan.frames)
+    print(f"\nPoint {label}: marked {marked}, skipped {skipped}, not yet marked {remaining} of {len(plan.frames)}")
+    print(f"Saved: {store.path}")
 
 
-def save_results():
-    out_json = BASE / "Videos" / case_id / "force_data" / f"{case_id}_suture_entry.json"
-    out_xlsx = BASE / "Videos" / case_id / "force_data" / f"{case_id}_suture_entry.xlsx"
-
-    # Load existing data
-    data = {}
-    if out_json.exists():
-        with open(out_json) as f:
-            data = json.load(f)
-
-    data[clip_label] = {
-        "px_per_mm": px_per_mm,
-        "frames": results,
-    }
-
-    with open(out_json, "w") as f:
-        json.dump(data, f, indent=2)
-    print(f"Saved JSON: {out_json}")
-
-    # Excel
-    if out_xlsx.exists():
-        wb = openpyxl.load_workbook(out_xlsx)
-        # Remove existing sheet for this clip
-        if clip_label in wb.sheetnames:
-            del wb[clip_label]
-    else:
-        wb = openpyxl.Workbook()
-        if "Sheet" in wb.sheetnames:
-            del wb["Sheet"]
-
-    ws = wb.create_sheet(title=clip_label)
-    ws.append(["Timestamp", "Abs seconds", "Left crus (px)", "Right crus (px)",
-               "Distance (px)", "Distance (mm)", "px/mm"])
-
-    for abs_sec in sorted(results.keys()):
-        r = results[abs_sec]
-        ws.append([
-            r["timestamp"],
-            r["abs_seconds"],
-            str(r["left_crus_px"]),
-            str(r["right_crus_px"]),
-            r["distance_px"],
-            r["distance_mm"],
-            px_per_mm,
-        ])
-
-    wb.save(out_xlsx)
-    print(f"Saved Excel: {out_xlsx}")
-
-
-fig.canvas.mpl_connect("button_press_event", onclick)
-fig.canvas.mpl_connect("key_press_event", onkey)
-plt.get_current_fig_manager().full_screen_toggle()
-show_frame(0)
-plt.show()
+if __name__ == "__main__":
+    main()

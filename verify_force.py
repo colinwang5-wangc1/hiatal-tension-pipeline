@@ -13,8 +13,13 @@ import cv2
 import tempfile
 import pandas as pd
 from pathlib import Path
-import Vision
-from Foundation import NSURL
+try:
+    import Vision
+    from Foundation import NSURL
+except ImportError:
+    sys.exit("verify_force.py needs macOS (Apple's Vision framework) and the packages "
+             "pyobjc-framework-Cocoa and pyobjc-framework-Vision. It is an optional diagnostic and is not "
+             "needed for the rest of the pipeline.")
 
 SAMPLE_EVERY = 10
 BASE = Path(__file__).resolve().parent / "Videos"
@@ -60,7 +65,7 @@ def main():
         sys.exit(1)
 
     video_path = sys.argv[1]
-    case = input("Case (e.g. YV005): ").strip()
+    case = input("Case (the case_id used for the other files, e.g. CASE001): ").strip()
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
