@@ -142,7 +142,7 @@ class TestFitChain(unittest.TestCase):
         raise AssertionError("row not found")
 
     def test_all_rows_is_the_default_and_matches_a_plain_regression(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir = build_case(root, self.idx, params)
             self.run_chain(root)
@@ -155,7 +155,7 @@ class TestFitChain(unittest.TestCase):
             self.assertAlmostEqual(row["A: Linear E (N)"], round(slope, 3), places=3)
 
     def test_window_rows_option_leaves_buffer_out_and_names_files_apart(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir = build_case(root, self.idx, params)
             self.run_chain(root)
@@ -171,7 +171,7 @@ class TestFitChain(unittest.TestCase):
 
     def test_row_set_changes_the_strain_reference(self):
         # the widest gap lies in the buffer-before rows, so 'all' and 'window' use different references
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir = build_case(root, self.idx, params)
             self.run_chain(root)
@@ -180,7 +180,7 @@ class TestFitChain(unittest.TestCase):
                                       self.table_row(fdir, "window")["A: Linear E (N)"], places=2)
 
     def test_table_footer_names_rows_and_version(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir = build_case(root, self.idx, params)
             self.run_chain(root, "--rows", "window")
@@ -190,7 +190,7 @@ class TestFitChain(unittest.TestCase):
             self.assertIn(fl.PIPELINE_VERSION, text)
 
     def test_plots_still_work_without_the_frame_table(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir = build_case(root, self.idx, params)
             mg.BASE = Path(root)

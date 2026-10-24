@@ -1,15 +1,14 @@
 """
 plan_measurements.py — Summarise what can be measured and set the stride for each point.
 
-Run after extract_point_forces.py. For every selected force second (window and buffer rows), the frames
-within +/- half-window (0.5 s) of it are the candidates for distance measurement. This script prints,
+Run after extract_point_forces.py. Each selected force second (window and buffer rows) is measured on the
+frames around its centre frame, the frame whose stored time is nearest the sample's time. This script prints,
 per point and in total:
     - how many force values were selected (window and buffer)
-    - the maximum number of frames available (every frame: stride 1; a frame shared by two
-      neighbouring force seconds counts once)
+    - the maximum number of frames available (every frame inside the limit: stride 1)
     - how many frames (and clicks, two per frame) other strides would need
-and then asks for the stride of each point: 1 measures every frame, 10 measures every tenth frame of the
-window, and so on. The choice is saved in a measurement plan that mark_suture_entry.py reads.
+and then asks for the stride of each point: 1 measures every frame, 10 measures every tenth frame, and so
+on. The choice is saved in a measurement plan that mark_suture_entry.py reads.
 
 Reads:
     Videos/<case_id>/force_data/<case_id>_frame_times.csv            (from index_video.py)
@@ -17,15 +16,20 @@ Reads:
 Writes:
     Videos/<case_id>/force_data/<case_id>_measurement_plan.json
 
-Layouts (frames offsets from the centre frame, for a half-window of H frames and stride s):
-    edge     -H, -H+s, ... up to +H (default; spans the whole window)
-    centred  0, +/-s, +/-2s, ...
+No frame serves two force seconds. Force samples are one second apart (30 frames at 30 fps), and a frame
+exactly half that far from the centre frame is halfway to the neighbouring sample. Every offset therefore
+stays strictly less than half the spacing: at most 14 frames either side at 30 fps (about 0.47 s), so one
+distance measurement feeds one point of the force-strain curve. The offsets are 0, +/-s, +/-2s, ... within
+that limit: stride 10 gives -10, 0, +10; stride 5 gives -10 to +10 by 5; stride 1 gives -14 to +14. The
+default half-window is the largest allowed; --half-window-s may lower it but a value that would allow 15
+frames (0.5 s at 30 fps) or more is refused. All of this assumes that a force sample's time is the centre of
+its second, not its start (see the README, "Timing convention").
 Marks are stored by frame, so the plan can be re-run later with a smaller stride to add frames; frames
 already marked are kept.
 
 Usage:
-    python3 plan_measurements.py <case_id> [--stride A=10 B=5 ...] [--half-window-s 0.5]
-            [--layout edge|centred] [--window-center-shift-s S] [--yes]
+    python3 plan_measurements.py <case_id> [--stride A=10 B=5 ...] [--half-window-s S]
+            [--window-center-shift-s S] [--yes]
     --stride accepts one number for every point (--stride 10) or per-point values (--stride A=10 B=1).
     Without --stride the script asks for each point; --yes accepts the default (10) without asking.
 """
@@ -41,6 +45,7 @@ BASE = Path(__file__).resolve().parent
 POINTS = ["A", "B", "C", "D"]
 DEFAULT_STRIDE = 10
 COMPARE_STRIDES = (1, 5, 10)
+SAMPLING_KEYS = ("half_window_frames", "time_offset_s", "window_center_shift_s")
 
 
 def read_selection_info(workbook_path):
@@ -64,12 +69,14 @@ def read_selection_info(workbook_path):
 def point_summary(index, rows, params):
     """Counts for one point: force values by role, maximum frames, frames at the comparison strides."""
     seconds = [x for x, _ in rows]
-    base = {k: params[k] for k in ("half_window_frames", "layout", "time_offset_s", "window_center_shift_s")}
+    base = {k: params[k] for k in SAMPLING_KEYS}
+    every_frame = fl.plan_point(index, seconds, stride=1, **base)
     out = {
         "force_values": len(rows),
         "window_values": sum(1 for _, r in rows if r == "window"),
         "buffer_values": sum(1 for _, r in rows if r != "window"),
-        "max_frames": len(fl.plan_point(index, seconds, stride=1, **base).frames),
+        "max_frames": len(every_frame.frames),
+        "shared_frames": len(every_frame.shared_frames()),
     }
     out["frames_at"] = {s: len(fl.plan_point(index, seconds, stride=s, **base).frames) for s in COMPARE_STRIDES}
     return out
@@ -125,9 +132,10 @@ def main(argv=None, input_fn=input, interactive=None):
     ap.add_argument("case_id")
     ap.add_argument("--stride", nargs="+", default=None,
                     help="one number for all points, or per point, e.g. A=10 B=5")
-    ap.add_argument("--half-window-s", type=float, default=0.5, dest="half_window_s",
-                    help="half-window around each force second, in seconds [0.5]")
-    ap.add_argument("--layout", choices=["edge", "centred"], default="edge")
+    ap.add_argument("--half-window-s", type=float, default=None, dest="half_window_s",
+                    help="half-window around each force second, in seconds. Must stay below half the spacing of the "
+                         "force samples (under 0.5 s: at most 14 frames at 30 fps) so that no frame serves two force "
+                         "seconds; a larger value is refused [the largest allowed]")
     ap.add_argument("--window-center-shift-s", type=float, default=0.0, dest="window_center_shift_s",
                     help="shift the window centre, e.g. +0.5 if a sample describes the following second [0]")
     ap.add_argument("--yes", action="store_true", help="accept the default stride without asking")
@@ -151,8 +159,16 @@ def main(argv=None, input_fn=input, interactive=None):
         sys.exit(f"ERROR: no point sheets in {workbook.name}")
     info = read_selection_info(workbook)
 
-    half_frames = fl.half_window_frames_from_seconds(index, args.half_window_s)
-    params = {"half_window_frames": half_frames, "layout": args.layout,
+    if args.half_window_s is None:
+        half_frames = fl.max_half_window_frames(index)
+    else:
+        half_frames = fl.half_window_frames_from_seconds(index, args.half_window_s)
+    half_window_s = round(half_frames * index.mean_gap_s, 3) if args.half_window_s is None else args.half_window_s
+    try:
+        fl.check_half_window(index, half_frames)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
+    params = {"half_window_frames": half_frames,
               "time_offset_s": info["time_offset_s"], "window_center_shift_s": args.window_center_shift_s}
 
     rows_by_point, summaries, legacy_any = {}, {}, False
@@ -164,8 +180,8 @@ def main(argv=None, input_fn=input, interactive=None):
 
     print(f"\nMeasurement plan for case {case_id}   (pipeline v{fl.PIPELINE_VERSION})")
     print(f"Frame table: {index.n} frames, mean {1.0 / index.mean_gap_s:.6f} fps.  "
-          f"Window around each force second: +/-{args.half_window_s:g} s = +/-{half_frames} frames, "
-          f"layout {args.layout}.")
+          f"Window around each force second: +/-{half_frames} frames (+/-{half_window_s:g} s); the limit is "
+          f"{fl.max_half_window_frames(index)} frames, so no frame serves two force seconds.")
     print(f"Buffer: {'not recorded' if info['buffer_s'] is None else format(info['buffer_s'], 'g') + ' s'}; "
           f"time offset (video minus force): {info['time_offset_s']:g} s.")
     if legacy_any:
@@ -189,7 +205,11 @@ def main(argv=None, input_fn=input, interactive=None):
     print("-" * len(head))
     print(f"{'Total':<6}{totals['force']:>13}{totals['window']:>8}{totals['buffer']:>8}{totals['max']:>12}   "
           + "".join(f"{totals[k]:>12}" for k in COMPARE_STRIDES))
-    print("Frames are distinct video frames (a frame shared by two force seconds counts once); each frame takes two clicks.\n")
+    shared = sum(summaries[label]["shared_frames"] for label in labels)
+    print(f"Frames used for two force seconds: {shared}.  Each frame takes two clicks.\n")
+    if shared:
+        sys.exit("ERROR: some frames would serve two force seconds (force samples closer together than the "
+                 "half-window allows, for example a video with dropped frames). Lower --half-window-s.")
 
     try:
         given = parse_strides(args.stride, labels)
@@ -204,10 +224,11 @@ def main(argv=None, input_fn=input, interactive=None):
     print("\nChosen:")
     for label in labels:
         s = strides[label]
-        frames = len(fl.plan_point(index, [x for x, _ in rows_by_point[label]], stride=s, **{
-            k: params[k] for k in ("half_window_frames", "layout", "time_offset_s", "window_center_shift_s")}).frames)
-        if s > 2 * half_frames and args.layout == "edge":
-            print(f"  note: stride {s} is wider than the window; point {label} gets one frame per force second")
+        frames = len(fl.plan_point(index, [x for x, _ in rows_by_point[label]], stride=s,
+                                   **{k: params[k] for k in SAMPLING_KEYS}).frames)
+        if s > half_frames:
+            print(f"  note: stride {s} is wider than the half-window ({half_frames} frames); "
+                  f"point {label} gets one frame per force second")
         points[label] = {**{k: summaries[label][k] for k in ("force_values", "window_values", "buffer_values", "max_frames")},
                          "stride": s, "planned_frames": frames}
         print(f"  Point {label}: stride {s} -> {frames} frames ({2 * frames} clicks)")
@@ -218,8 +239,8 @@ def main(argv=None, input_fn=input, interactive=None):
         "schema_version": fl.PLAN_SCHEMA_VERSION, "pipeline_version": fl.PIPELINE_VERSION, "case_id": case_id,
         "created": fl.utc_now(),
         "frame_table": {"video_name": index.source_name, "frames": index.n, "mean_fps": round(1.0 / index.mean_gap_s, 6)},
-        "parameters": {"half_window_s": args.half_window_s, "half_window_frames": half_frames,
-                       "layout": args.layout, "window_center_shift_s": args.window_center_shift_s,
+        "parameters": {"half_window_s": half_window_s, "half_window_frames": half_frames,
+                       "window_center_shift_s": args.window_center_shift_s,
                        "time_offset_s": info["time_offset_s"], "buffer_s": info["buffer_s"]},
         "points": points,
     }

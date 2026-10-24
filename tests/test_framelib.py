@@ -39,25 +39,83 @@ WINDOWS = {
 }
 
 
-class TestLayouts(unittest.TestCase):
-    def test_offsets(self):
-        self.assertEqual(fl.layout_offsets(15, 10, "edge"), [-15, -5, 5, 15])
-        self.assertEqual(fl.layout_offsets(15, 10, "centred"), [-10, 0, 10])
-        self.assertEqual(fl.layout_offsets(15, 5, "edge"), [-15, -10, -5, 0, 5, 10, 15])
-        self.assertEqual(fl.layout_offsets(15, 5, "centred"), [-15, -10, -5, 0, 5, 10, 15])
-        self.assertEqual(fl.layout_offsets(15, 1, "edge"), list(range(-15, 16)))
-        self.assertEqual(fl.layout_offsets(0, 10, "edge"), [0])
-        self.assertEqual(fl.layout_offsets(0, 10, "centred"), [0])
+CFR = {  # constant-frame-rate videos: name -> (time base denominator, ticks per frame)
+    "30": (60000, 2000), "29.97": (60000, 2002), "25": (60000, 2400),
+    "24": (60000, 2500), "60": (60000, 1000), "59.94": (60000, 1001),
+}
 
-    def test_edge_and_centred_cover_stride5(self):
-        union = set(fl.layout_offsets(15, 10, "edge")) | set(fl.layout_offsets(15, 10, "centred"))
-        self.assertEqual(sorted(union), fl.layout_offsets(15, 5, "edge"))
+
+def cfr_index(name, n=6000):
+    den, step = CFR[name]
+    k = np.arange(n)
+    return fl.FrameIndex(k * step, k % 300 == 0, 1, den, f"cfr{name}.mp4", 0, 0)
+
+
+class TestLayouts(unittest.TestCase):
+    def test_offsets_are_multiples_of_the_stride_around_the_centre(self):
+        self.assertEqual(fl.layout_offsets(14, 10), [-10, 0, 10])
+        self.assertEqual(fl.layout_offsets(14, 5), [-10, -5, 0, 5, 10])
+        self.assertEqual(fl.layout_offsets(14, 1), list(range(-14, 15)))
+        self.assertEqual(fl.layout_offsets(0, 10), [0])
+        self.assertEqual(fl.layout_offsets(9, 10), [0])
 
     def test_bad_input(self):
         with self.assertRaises(ValueError):
-            fl.layout_offsets(15, 0)
+            fl.layout_offsets(14, 0)
         with self.assertRaises(ValueError):
-            fl.layout_offsets(15, 10, "wide")
+            fl.layout_offsets(-1, 10)
+
+    def test_the_edge_layout_is_gone(self):
+        # under the limit it would give lopsided offsets (-14, -4, +6 at stride 10)
+        with self.assertRaises(ValueError):
+            fl.resolve_params(layout="edge")
+        with self.assertRaises(ValueError):
+            fl.sample_frames(synthetic_index(2000), 20, layout="edge")
+
+
+class TestHalfWindowLimit(unittest.TestCase):
+    """No frame may serve two force seconds: every offset is strictly less than half the force-sample spacing."""
+    LIMITS = {"30": 14, "29.97": 14, "25": 12, "24": 11, "60": 29, "59.94": 29}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.idx = synthetic_index()
+
+    def test_limit_follows_the_frame_rate(self):
+        for name, limit in self.LIMITS.items():
+            self.assertEqual(fl.max_half_window_frames(cfr_index(name)), limit, name)
+        self.assertEqual(fl.max_half_window_frames(synthetic_index(2000)), 14)     # 30.000011 fps
+
+    def test_default_half_window_is_the_limit(self):
+        _, frames = fl.sample_frames(self.idx, 8378, stride=1)
+        self.assertEqual((frames[0].offset_frames, frames[-1].offset_frames, len(frames)), (-14, 14, 29))
+        for stride, offsets in ((10, [-10, 0, 10]), (5, [-10, -5, 0, 5, 10])):
+            _, f = fl.sample_frames(self.idx, 8378, stride=stride)
+            self.assertEqual([x.offset_frames for x in f], offsets)
+
+    def test_a_half_window_over_the_limit_is_refused_at_the_limit_it_is_not(self):
+        for h in (15, 20, 30):
+            with self.assertRaises(ValueError) as cm:
+                fl.sample_frames(self.idx, 8378, half_window_frames=h)
+            self.assertIn("14", str(cm.exception))
+        _, frames = fl.sample_frames(self.idx, 8378, half_window_frames=14, stride=1)
+        self.assertEqual(len(frames), 29)
+
+    def test_no_frame_serves_two_force_seconds_at_any_stride_and_frame_rate(self):
+        for name in self.LIMITS:
+            idx = cfr_index(name)
+            for stride in (1, 5, 10):
+                plan = fl.plan_point(idx, range(5, 60), stride=stride)
+                self.assertEqual(plan.shared_frames(), [], (name, stride))
+                slots = sum(len(f) for _, f in plan.samples.values())
+                self.assertEqual(len(plan.frames), slots, (name, stride))      # every slot is its own frame
+        for stride in (1, 5, 10):                                                # and on the real-looking timestamps
+            for secs in WINDOWS.values():
+                self.assertEqual(fl.plan_point(self.idx, secs, stride=stride).shared_frames(), [])
+
+    def test_sharing_is_detected_when_force_seconds_are_too_close(self):
+        plan = fl.plan_point(self.idx, [8378.0, 8378.4], stride=1)               # 12 frames apart
+        self.assertTrue(plan.shared_frames())
 
 
 class TestSelection(unittest.TestCase):
@@ -68,48 +126,35 @@ class TestSelection(unittest.TestCase):
     def test_centre_frame_is_nearest_pts_not_index_over_fps(self):
         centre, frames = fl.sample_frames(self.idx, 8378, stride=1)
         self.assertEqual(centre, 251340)
-        self.assertEqual([f.frame for f in frames], list(range(251325, 251356)))
-        self.assertEqual(len(frames), 31)
+        self.assertEqual([f.frame for f in frames], list(range(251326, 251355)))
+        self.assertEqual(len(frames), 29)
 
-    def test_stride_layouts_for_one_second(self):
-        _, edge = fl.sample_frames(self.idx, 8378, stride=10, layout="edge")
-        _, cen = fl.sample_frames(self.idx, 8378, stride=10, layout="centred")
-        self.assertEqual([f.frame for f in edge], [251325, 251335, 251345, 251355])
-        self.assertEqual([f.frame for f in cen], [251330, 251340, 251350])
+    def test_stride_offsets_for_one_second(self):
+        _, s10 = fl.sample_frames(self.idx, 8378, stride=10)
+        _, s5 = fl.sample_frames(self.idx, 8378, stride=5)
+        self.assertEqual([f.frame for f in s10], [251330, 251340, 251350])
+        self.assertEqual([f.frame for f in s5], [251330, 251335, 251340, 251345, 251350])
 
-    def test_boundary_frames_sit_off_the_exact_500ms(self):
-        # the centre frame is a few ms before x, so the -15 frame is just past -500 ms:
-        # a hard +/-500 ms PTS cut would have dropped it and kept only 30 frames.
+    def test_every_frame_is_within_half_a_second_of_its_force_second(self):
         _, frames = fl.sample_frames(self.idx, 8378, stride=1)
-        first, last = frames[0], frames[-1]
-        self.assertLess(first.offset_ms, -500.0)
-        self.assertLess(last.offset_ms, 500.0)
-        self.assertEqual((first.offset_frames, last.offset_frames), (-15, 15))
+        self.assertTrue(all(abs(f.offset_ms) < 500.0 for f in frames))
+        self.assertEqual((frames[0].offset_frames, frames[-1].offset_frames), (-14, 14))
 
-    def test_unique_frame_counts_per_layout(self):
-        expected = {  # (stride, layout) -> unique frames over A..D
-            (1, "edge"): 1474, (5, "edge"): 298, (10, "centred"): 147, (10, "edge"): 151,
-        }
-        for (stride, layout), total in expected.items():
-            got = sum(len(fl.plan_point(self.idx, secs, stride=stride, layout=layout).frames)
-                      for secs in WINDOWS.values())
-            self.assertEqual(got, total, (stride, layout))
+    def test_unique_frame_counts_per_stride(self):
+        expected = {1: 1421, 5: 245, 10: 147}          # 49 force seconds x 29, 5, 3 frames: none shared
+        for stride, total in expected.items():
+            got = sum(len(fl.plan_point(self.idx, secs, stride=stride).frames) for secs in WINDOWS.values())
+            self.assertEqual(got, total, stride)
 
     def test_per_point_counts_stride1(self):
         got = {p: len(fl.plan_point(self.idx, s, stride=1).frames) for p, s in WINDOWS.items()}
-        self.assertEqual(got, {"A": 301, "B": 331, "C": 481, "D": 361})
-
-    def test_shared_boundary_frame_measured_once(self):
-        plan = fl.plan_point(self.idx, WINDOWS["A"], stride=1)
-        shared = plan.membership[251355]            # +15 of 8378 and -15 of 8379
-        self.assertEqual([(s, o) for s, o, _ in shared], [(8378.0, 15), (8379.0, -15)])
-        self.assertEqual(plan.frames.count(251355), 1)
+        self.assertEqual(got, {"A": 290, "B": 319, "C": 464, "D": 348})
 
     def test_denser_pass_only_adds_frames(self):
-        sparse = set(fl.plan_point(self.idx, WINDOWS["C"], stride=10, layout="centred").frames)
-        sparse |= set(fl.plan_point(self.idx, WINDOWS["C"], stride=10, layout="edge").frames)
+        sparse = set(fl.plan_point(self.idx, WINDOWS["C"], stride=10).frames)
         dense5 = set(fl.plan_point(self.idx, WINDOWS["C"], stride=5).frames)
-        self.assertEqual(sparse, dense5)
+        dense1 = set(fl.plan_point(self.idx, WINDOWS["C"], stride=1).frames)
+        self.assertTrue(sparse < dense5 < dense1)
 
     def test_time_offset_and_centre_shift(self):
         c0, _ = fl.sample_frames(self.idx, 8378)
@@ -126,7 +171,7 @@ class TestSelection(unittest.TestCase):
         centre, frames = fl.sample_frames(self.idx, 0.0, stride=1)
         self.assertEqual(centre, 0)
         self.assertEqual(frames[0].frame, 0)
-        self.assertEqual(len(frames), 16)
+        self.assertEqual(len(frames), 15)
 
 
 class TestIndexFile(unittest.TestCase):
@@ -285,7 +330,7 @@ class TestMarksStore(unittest.TestCase):
         idx = synthetic_index()
         with tempfile.TemporaryDirectory() as d:
             s = fl.MarksStore(Path(d) / "m.json", "case")
-            first = fl.plan_point(idx, WINDOWS["A"], stride=10, layout="edge").frames
+            first = fl.plan_point(idx, WINDOWS["A"], stride=10).frames
             for k in first:
                 s.put("A", k, self.rec())
             dense = fl.plan_point(idx, WINDOWS["A"], stride=5).frames

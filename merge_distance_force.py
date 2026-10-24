@@ -17,7 +17,7 @@ For each "Point <X>" sheet, every force row gets:
     Total Force (N)            sum of the active-arm columns (a blank arm counts as 0)
     Distance (mm)              MEAN over the measured frames of that force second
     Distance SD (mm)           sample SD across those frames (blank when N < 2)
-    N frames, Frames planned   measured (not skipped) frames / frames in the layout
+    N frames, Frames planned   measured (not skipped) frames / frames planned for it
     Distance min/max/median (mm), Distance (px)   (px = mean)
     Fit at x (mm), Slope (mm/s), Fit resid SD (mm)
                                straight line through distance vs frame time: its value at the
@@ -25,7 +25,7 @@ For each "Point <X>" sheet, every force row gets:
 The Role column from extract_point_forces.py (window, buffer-before, buffer-after) is kept, so buffer
 rows stay in the data and can be left out of an analysis (fit_moduli.py --rows window).
 
-How to read the spread: the frames of one force second lie up to +/-0.5 s apart, and the
+How to read the spread: the frames of one force second lie up to +/-0.47 s apart (14 frames at 30 fps), and the
 gap can change by several mm per second, so Distance SD mixes real tissue motion, click
 noise and timing ambiguity. It is a conservative uncertainty of the distance at the
 nominal sample time, not pure measurement error. "Fit resid SD" is closer to click noise.
@@ -33,11 +33,12 @@ With only 3-4 frames per force second any SD is a rough estimate.
 
 The frames that belong to each force second come from the same parameters the marks were
 made with (stored in the marks file), or from the options below to re-summarise the same
-frames under another layout, e.g. the sparse subset of a denser pass.
+frames under another stride, e.g. the sparse subset of a denser pass. A half-window of 15 frames or more
+(the 2.0.0 default) is refused: every frame must belong to one force second (see plan_measurements.py).
 
 Usage:
     python3 merge_distance_force.py <case_id> [--half-window-frames N] [--stride N]
-            [--layout edge|centred] [--time-offset-s S] [--window-center-shift-s S]
+            [--time-offset-s S] [--window-center-shift-s S]
 """
 
 import argparse
@@ -91,7 +92,6 @@ def parse_args(argv=None):
     ap.add_argument("case_id")
     ap.add_argument("--half-window-frames", dest="half_window_frames", type=int)
     ap.add_argument("--stride", type=int)
-    ap.add_argument("--layout", choices=["edge", "centred"])
     ap.add_argument("--time-offset-s", dest="time_offset_s", type=float)
     ap.add_argument("--window-center-shift-s", dest="window_center_shift_s", type=float)
     ap.add_argument("--version", action="version", version=f"%(prog)s {fl.PIPELINE_VERSION}")
@@ -137,8 +137,12 @@ def main(argv=None):
             ws.column_dimensions[ws.cell(row=1, column=c).column_letter].width = 16
 
         given = {k: getattr(args, k) for k in fl.PARAM_DEFAULTS}
-        params = fl.resolve_params(**{**(store.last_params(label) or {}),
-                                      **{k: v for k, v in given.items() if v is not None}})
+        params = fl.resolve_params(index, **{**(store.last_params(label) or {}),
+                                             **{k: v for k, v in given.items() if v is not None}})
+        try:
+            fl.check_half_window(index, params["half_window_frames"])
+        except ValueError as e:
+            sys.exit(f"ERROR: point {label}: {e}")
         planned = measured = skipped = unmarked = 0
         with_data = {"window": 0, "buffer": 0}
         for row in ws.iter_rows(min_row=2):
@@ -194,7 +198,7 @@ def main(argv=None):
 
     ws = wb.create_sheet("Merge info")
     ws.append([f"Pipeline version {fl.PIPELINE_VERSION}. Per-point parameters and frame counts (frames counted over the "
-               "force seconds that are measured; a frame shared by two seconds is counted once per second)"])
+               "force seconds that are measured; every frame belongs to one force second)"])
     ws.append(["Point", *fl.PARAM_DEFAULTS.keys(), "Window seconds with data", "Buffer seconds with data",
                "Frames planned", "Measured", "Skipped", "Not yet marked"])
     for line in info:

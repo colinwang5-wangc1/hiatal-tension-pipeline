@@ -11,6 +11,7 @@ Run from the repository root:
 
 import csv
 import hashlib
+import json
 import sys
 import tempfile
 import unittest
@@ -90,7 +91,7 @@ class TestMerge(unittest.TestCase):
         mg.main([CASE, *extra])
 
     def test_statistics_match_the_known_linear_gap(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             before = sha(fdir / f"{CASE}_points_ABCD_force.xlsx")
@@ -100,7 +101,7 @@ class TestMerge(unittest.TestCase):
             r = rows[8380.0]
             _, frames = fl.sample_frames(self.idx, 8380, **params)
             t_rel = np.array([f.offset_ms / 1000 for f in frames])
-            self.assertEqual((r["N frames"], r["Frames planned"]), (4, 4))
+            self.assertEqual((r["N frames"], r["Frames planned"]), (3, 3))
             self.assertAlmostEqual(r["Fit at x (mm)"], true_d(8380.0), places=3)
             self.assertAlmostEqual(r["Slope (mm/s)"], SLOPE, places=3)
             self.assertLess(r["Fit resid SD (mm)"], 1e-3)
@@ -112,7 +113,7 @@ class TestMerge(unittest.TestCase):
             self.assertEqual(r["Role"], "window")
 
     def test_buffer_rows_are_measured_and_labelled(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             self.run_merge(root)
@@ -121,25 +122,25 @@ class TestMerge(unittest.TestCase):
             self.assertEqual(rows[8390.0]["Role"], "buffer-after")
             self.assertAlmostEqual(rows[8374.0]["Fit at x (mm)"], true_d(8374.0), places=3)
             self.assertAlmostEqual(rows[8390.0]["Fit at x (mm)"], true_d(8390.0), places=3)
-            self.assertEqual(rows[8374.0]["N frames"], 4)
+            self.assertEqual(rows[8374.0]["N frames"], 3)
             roles = {r["role"] for r in read_csv(fdir)}
             self.assertEqual(roles, {"buffer-before", "window", "buffer-after"})
 
-    def test_csv_has_every_planned_frame_once_per_force_second(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+    def test_csv_has_every_planned_frame_once_and_none_serves_two_force_seconds(self):
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             self.run_merge(root)
             rows = read_csv(fdir)
-            self.assertEqual(len(rows), 20 * 4)                    # 20 seconds x 4 frames
+            self.assertEqual(len(rows), 20 * 3)                    # 20 seconds x 3 frames
             self.assertEqual({r["status"] for r in rows}, {"marked"})
-            shared = [r for r in rows if r["frame"] == "251355"]
-            self.assertEqual(sorted(r["force_second"] for r in shared), ["8378.0", "8379.0"])
+            frames = [r["frame"] for r in rows]
+            self.assertEqual(len(set(frames)), len(frames))        # no frame is listed for two force seconds
             self.assertEqual(rows[0]["role"], "buffer-before")
             self.assertIn("time_s", rows[0])
 
     def test_merge_info_sheet_has_version_and_counts(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             self.run_merge(root)
@@ -151,7 +152,7 @@ class TestMerge(unittest.TestCase):
             self.assertEqual((line["Window seconds with data"], line["Buffer seconds with data"]), (10, 10))
 
     def test_skipped_and_partial_samples(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             _, f8381 = fl.sample_frames(self.idx, 8381, **params)
@@ -170,21 +171,46 @@ class TestMerge(unittest.TestCase):
             self.assertEqual(rows[8383.0]["N frames"], 1)
             self.assertIsNone(rows[8383.0]["Distance SD (mm)"])
             self.assertIsNone(rows[8383.0]["Fit at x (mm)"])
-            self.assertEqual(rows[8385.0]["N frames"], 3)
-            self.assertIsNotNone(rows[8385.0]["Fit resid SD (mm)"])
+            self.assertEqual(rows[8385.0]["N frames"], 2)
+            self.assertIsNotNone(rows[8385.0]["Distance SD (mm)"])
+            self.assertIsNone(rows[8385.0]["Fit resid SD (mm)"])        # the fit needs 3 frames
             self.assertIn("skipped", [r["status"] for r in read_csv(fdir)])
 
-    def test_resummarise_under_a_denser_layout_counts_unmarked(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+    def test_resummarise_under_a_denser_stride_counts_unmarked(self):
+        params = fl.resolve_params(stride=10)
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params)
             self.run_merge(root, "--stride", "5")
             rows = {r["Seconds"]: r for r in read_merged(fdir)}
-            self.assertEqual((rows[8380.0]["N frames"], rows[8380.0]["Frames planned"]), (4, 7))
+            self.assertEqual((rows[8380.0]["N frames"], rows[8380.0]["Frames planned"]), (3, 5))
             self.assertIn("unmarked", [r["status"] for r in read_csv(fdir)])
 
+    def test_a_half_window_over_the_limit_is_refused(self):
+        params = fl.resolve_params(stride=10)
+        with tempfile.TemporaryDirectory() as root:
+            build_case(root, self.idx, params)
+            with self.assertRaises(SystemExit) as cm:
+                self.run_merge(root, "--half-window-frames", "15")
+            self.assertIn("largest allowed is 14 frames", str(cm.exception))
+
+    def test_marks_stored_by_2_0_0_are_kept_but_not_merged_under_the_old_window(self):
+        params = fl.resolve_params(stride=10)
+        with tempfile.TemporaryDirectory() as root:
+            fdir, store, plan = build_case(root, self.idx, params)
+            path = fdir / f"{CASE}_frame_marks.json"
+            data = json.loads(path.read_text())
+            data["pipeline_version"] = "2.0.0"
+            data["points"]["A"]["params_history"][0].update({"half_window_frames": 15, "layout": "edge"})
+            path.write_text(json.dumps(data))
+            with self.assertRaises(SystemExit) as cm:
+                self.run_merge(root)
+            self.assertIn("point A", str(cm.exception))
+            self.assertIn("plan_measurements.py", str(cm.exception))
+            self.assertEqual(json.loads(path.read_text())["points"]["A"]["frames"], data["points"]["A"]["frames"])  # kept
+            self.run_merge(root, "--half-window-frames", "14")          # explicit override still works
+
     def test_legacy_workbook_without_role_measures_window_rows_only(self):
-        params = fl.resolve_params(stride=10, layout="edge")
+        params = fl.resolve_params(stride=10)
         window = [x for x in SECONDS if role_of(x) == "window"]
         with tempfile.TemporaryDirectory() as root:
             fdir, store, plan = build_case(root, self.idx, params, with_role=False, measured=window)

@@ -6,8 +6,9 @@ comes with an uncertainty instead of resting on one frame.
 For every selected force second (window and buffer rows from extract_point_forces.py), frames
 are chosen around it by their true timestamps (see framelib.py): the centre frame is the one whose
 stored timestamp is nearest the force second (+ time offsets), and the sampled frames are that frame
-plus a set of frame offsets (the layout and stride set by plan_measurements.py). Each distinct
-raw frame is marked once, even when neighbouring force seconds share it. Frames are decoded exactly
+plus a set of frame offsets (the stride set by plan_measurements.py, always strictly fewer than
+half the spacing of the force samples, so every frame belongs to one force second). Each raw
+frame is marked once. Frames are decoded exactly
 from the RAW video; the time shown on screen is the frame's stored timestamp. The title also says
 whether each force second is a window row or a buffer row.
 
@@ -38,11 +39,14 @@ Usage:
     python3 mark_suture_entry.py <video.mp4> <case_id> <point> [options]
 
 Options (the measurement plan supplies the defaults; options given here override it and are recorded):
-    --half-window-frames N   frames on each side of the centre frame
-    --stride N               spacing of sampled frames, in frames
-    --layout edge|centred    edge: -H,-H+s,..  centred: 0,+/-s,..
+    --half-window-frames N   frames on each side of the centre frame; at most 14 at 30 fps (strictly less than
+                             half the spacing of the force samples, so no frame serves two force seconds)
+    --stride N               spacing of sampled frames, in frames: offsets 0, +/-N, +/-2N, ... within the half-window
     --time-offset-s S        video time minus force time (clock offset)
-    --window-center-shift-s S  shift the window centre (sample = bin start?)
+    --window-center-shift-s S  shift the window centre. The pipeline assumes a force sample at second x is the
+                             centre of that second. If the console means the second that starts at x, the frames
+                             sit half a second early and +0.5 corrects it. Not verified: see the README, "Timing
+                             convention"
     --list                   print the frame plan and progress, then exit
     --verify                 re-decode this point's marked frames and check their CRCs
     --no-ghost               start with ghost marks hidden
@@ -350,7 +354,6 @@ def parse_args(argv=None):
     ap.add_argument("point")
     ap.add_argument("--half-window-frames", dest="half_window_frames", type=int)
     ap.add_argument("--stride", type=int)
-    ap.add_argument("--layout", choices=["edge", "centred"])
     ap.add_argument("--time-offset-s", dest="time_offset_s", type=float)
     ap.add_argument("--window-center-shift-s", dest="window_center_shift_s", type=float)
     ap.add_argument("--list", action="store_true")
@@ -375,11 +378,14 @@ def prepare(video, case_id, label, overrides=None):
         sys.exit(f"ERROR: existing marks were made on a video with {prev['frames']} frames, this one has "
                  f"{index.n}. Use a different case folder or move the old marks.")
     given = {k: v for k, v in (overrides or {}).items() if v is not None}
-    params = fl.resolve_params(**{**(store.last_params(label) or {}), **fl.plan_point_params(measurement_plan, label),
-                                  **given})
+    params = fl.resolve_params(index, **{**(store.last_params(label) or {}),
+                                         **fl.plan_point_params(measurement_plan, label), **given})
     rows = force_rows(case_id, label)
     roles = {x: role for x, role in rows}
-    plan = fl.plan_point(index, [x for x, _ in rows], **params)
+    try:
+        plan = fl.plan_point(index, [x for x, _ in rows], **params)
+    except ValueError as e:
+        sys.exit(f"ERROR: {e}")
     if not plan.frames:
         sys.exit("ERROR: no frames fall inside the video for this point's force seconds")
     return index, store, params, plan, roles

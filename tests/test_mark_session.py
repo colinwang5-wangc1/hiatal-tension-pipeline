@@ -140,7 +140,7 @@ class TestMarkSession(unittest.TestCase):
 
     def test_denser_pass_resumes_at_new_frames_only(self):
         with tempfile.TemporaryDirectory() as d:
-            store, plan, s = self.make(d, stride=10, layout="edge")
+            store, plan, s = self.make(d, stride=10)
             for _ in range(len(plan.frames)):
                 s.click(0, 0), s.click(0, 10)
                 s.step(+1)
@@ -155,15 +155,22 @@ class TestMarkSession(unittest.TestCase):
             s5.click(0, 0), s5.click(0, 30)
             self.assertEqual(store.get("A", s5.order[0])["distance_mm"], 1.0)   # existing mark untouched
 
-    def test_describe_lists_every_force_second_sharing_a_frame(self):
+    def test_describe_names_the_force_second_and_the_offset(self):
         with tempfile.TemporaryDirectory() as d:
             store, plan, s = self.make(d, stride=1)
-            shared = 251355
-            text = s.describe(shared)
+            text = s.describe(251354)                       # the last frame of force second 8378: +14
             self.assertIn("8378", text)
-            self.assertIn("8379", text)
-            self.assertIn("+15 f", text)
-            self.assertIn("-15 f", text)
+            self.assertIn("+14 f", text)
+            self.assertNotIn("8379", text)                  # no other force second uses this frame
+
+    def test_describe_lists_every_force_second_when_a_frame_is_shared(self):
+        # cannot happen at the default limit; two samples 0.4 s apart force it
+        with tempfile.TemporaryDirectory() as d:
+            store = fl.MarksStore(Path(d) / "marks.json", "case")
+            plan = fl.plan_point(self.idx, [8378.0, 8378.4], stride=1)
+            s = ms.MarkSession(store, "A", plan, 10.0, self.idx, get_frame=fake_frame)
+            text = s.describe(plan.shared_frames()[0])
+            self.assertEqual(text.count("force s "), 2)     # both force seconds are named
 
 
 if __name__ == "__main__":

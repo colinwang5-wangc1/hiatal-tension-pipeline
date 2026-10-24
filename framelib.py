@@ -24,11 +24,18 @@ Conventions
   every frame is recorded. (A fixed +/-500 ms test on PTS would drop or keep a
   boundary frame depending on where the centre frame falls inside its 33 ms slot.)
 
-Layouts (half_window = H frames, stride = s)
-    edge:    offsets -H, -H+s, ... (<= +H); symmetric when 2H is a multiple of s
-    centred: offsets 0, +/-s, +/-2s, ... (<= H)
-With H = 15 and s = 10: edge -> -15,-5,+5,+15; centred -> -10,0,+10. The union
-of both is the stride-5 layout, so a denser pass only adds frames.
+Offsets (half_window = H frames, stride = s)
+    0, +/-s, +/-2s, ... (<= H): centred on the centre frame.
+With H = 14 and s = 10 the offsets are -10, 0, +10; s = 5 gives -10..+10 by 5; s = 1 gives
+-14..+14. A denser stride only adds frames.
+
+No frame may serve two force seconds. Force samples are one second apart, which is about 30
+frames at 30 fps, and a frame exactly half that far from the centre frame is halfway to the
+neighbouring sample. Every offset therefore stays strictly less than half the spacing of the
+force samples (max_half_window_frames: 14 at 30 and 29.97 fps, 29 at 60 fps), so one distance
+measurement feeds exactly one point of the force-strain curve. sample_frames refuses a larger
+half-window, and the default half-window is the largest allowed. (Versions 2.0.0 and earlier
+used H = 15 with an "edge" layout whose offsets -15 and +15 were shared by neighbouring seconds.)
 
 Decoding needs PyAV (pip install av). Index building and selection do not.
 """
@@ -44,9 +51,8 @@ from pathlib import Path
 import numpy as np
 
 PARAM_DEFAULTS = {
-    "half_window_frames": 15,
+    "half_window_frames": None,        # None = the largest allowed for the video (max_half_window_frames)
     "stride": 10,
-    "layout": "edge",
     "time_offset_s": 0.0,
     "window_center_shift_s": 0.0,
 }
@@ -244,21 +250,50 @@ class SampleFrame:
     offset_ms: float   # frame PTS minus the sample's target time, in ms
 
 
-def layout_offsets(half_window_frames, stride, layout="edge"):
+def max_half_window_frames(index, interval_s=1.0):
+    """Largest half-window, in frames, that keeps every frame in one force second.
+
+    Force samples are interval_s apart, so the centre frames of neighbouring force seconds are at least
+    floor(interval_s / mean frame gap) frames apart (29 or 30 at 29.97 fps). The windows centre +/- h stay
+    apart while 2h is less than that distance, which is strictly less than half the force-sample spacing."""
+    if not index.mean_gap_s:
+        return 0
+    spacing = int(np.floor(interval_s / index.mean_gap_s + 1e-6))
+    return max((spacing - 1) // 2, 0)
+
+
+def check_half_window(index, half_window_frames):
+    """Raise ValueError when a half-window would let one frame serve two force seconds."""
+    limit = max_half_window_frames(index)
+    if half_window_frames > limit:
+        fps = 1.0 / index.mean_gap_s
+        raise ValueError(
+            f"a half-window of {half_window_frames} frames would let one frame serve two force seconds. "
+            f"For this video ({fps:.3f} fps, {fps:.1f} frames between force samples) the largest allowed is "
+            f"{limit} frames ({limit * index.mean_gap_s:.3f} s): strictly less than half the spacing. "
+            "Re-run plan_measurements.py with a smaller --half-window-s; marks already made are kept.")
+
+
+def layout_offsets(half_window_frames, stride):
+    """Frame offsets from the centre frame: 0, +/-stride, +/-2*stride, ... within +/-half_window_frames."""
     h, s = int(half_window_frames), int(stride)
     if h < 0 or s < 1:
         raise ValueError("half_window_frames must be >= 0 and stride >= 1")
-    if layout == "edge":
-        return list(range(-h, h + 1, s))
-    if layout == "centred":
-        n = h // s
-        return [j * s for j in range(-n, n + 1)]
-    raise ValueError(f"unknown layout {layout!r} (use 'edge' or 'centred')")
+    n = h // s
+    return [j * s for j in range(-n, n + 1)]
 
 
-def resolve_params(**overrides):
+def resolve_params(index=None, **overrides):
+    """Sampling parameters: the defaults, then the given values. With a frame table the default
+    half-window becomes the largest allowed for that video."""
+    unknown = sorted(set(overrides) - set(PARAM_DEFAULTS))
+    if unknown:
+        raise ValueError(f"unknown sampling parameter(s): {', '.join(unknown)} "
+                         f"(the 'edge'/'centred' layout choice was removed in version 2.1.0)")
     p = dict(PARAM_DEFAULTS)
     p.update({k: v for k, v in overrides.items() if v is not None})
+    if index is not None and p["half_window_frames"] is None:
+        p["half_window_frames"] = max_half_window_frames(index)
     return p
 
 
@@ -268,13 +303,14 @@ def target_time(force_second, params):
 
 def sample_frames(index, force_second, **params):
     """Return (centre_frame, [SampleFrame]) for one force second; (None, []) if outside the video."""
-    p = resolve_params(**params)
+    p = resolve_params(index, **params)
+    check_half_window(index, p["half_window_frames"])
     t = target_time(force_second, p)
     centre = index.nearest(t)
     if centre is None:
         return None, []
     out = []
-    for off in layout_offsets(p["half_window_frames"], p["stride"], p["layout"]):
+    for off in layout_offsets(p["half_window_frames"], p["stride"]):
         k = centre + off
         if 0 <= k < index.n:
             out.append(SampleFrame(k, off, float((index.pts_s[k] - t) * 1000.0)))
@@ -287,9 +323,14 @@ class PointPlan:
     frames: list       # sorted unique raw frame indices to measure
     membership: dict   # frame -> [(force second, offset_frames, offset_ms), ...]
 
+    def shared_frames(self):
+        """Frames that serve more than one force second. Empty unless force seconds are closer
+        together than the half-window allows (for example a variable-frame-rate video with gaps)."""
+        return sorted(k for k, m in self.membership.items() if len({x for x, _, _ in m}) > 1)
+
 
 def plan_point(index, seconds, **params):
-    """All frames to measure for one point. A frame shared by neighbouring seconds appears once."""
+    """All frames to measure for one point (sorted, each once; see PointPlan.shared_frames)."""
     samples, membership = {}, {}
     for x in seconds:
         x = round(float(x), 3)
@@ -425,7 +466,7 @@ def plan_point_params(plan, label):
     pt = plan["points"].get(label)
     if pt is None:
         raise SystemExit(f"Point {label} is not in the measurement plan; re-run plan_measurements.py")
-    return {"half_window_frames": p["half_window_frames"], "stride": pt["stride"], "layout": p["layout"],
+    return {"half_window_frames": p["half_window_frames"], "stride": pt["stride"],
             "time_offset_s": p["time_offset_s"], "window_center_shift_s": p["window_center_shift_s"]}
 
 

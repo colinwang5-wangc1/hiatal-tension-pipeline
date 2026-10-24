@@ -197,23 +197,25 @@ class TestPlanMeasurements(unittest.TestCase):
             plan, out = self.plan(root, "--yes")
             a, b = plan["points"]["A"], plan["points"]["B"]
             self.assertEqual((a["force_values"], a["window_values"], a["buffer_values"]), (20, 10, 10))
-            self.assertEqual(a["max_frames"], 30 * 20 + 1)          # 20 contiguous seconds, boundary frames shared
-            self.assertEqual((a["stride"], a["planned_frames"]), (10, 3 * 20 + 1))
-            self.assertEqual((b["force_values"], b["max_frames"], b["planned_frames"]), (3, 91, 10))
+            self.assertEqual(a["max_frames"], 29 * 20)              # 20 contiguous seconds, no frame shared
+            self.assertEqual((a["stride"], a["planned_frames"]), (10, 3 * 20))
+            self.assertEqual((b["force_values"], b["max_frames"], b["planned_frames"]), (3, 87, 9))
             p = plan["parameters"]
-            self.assertEqual((p["half_window_s"], p["half_window_frames"], p["layout"]), (0.5, 15, "edge"))
+            self.assertEqual((p["half_window_s"], p["half_window_frames"]), (0.467, 14))
+            self.assertNotIn("layout", p)
             self.assertEqual((p["time_offset_s"], p["buffer_s"], p["window_center_shift_s"]), (0.0, 5.0, 0.0))
             self.assertEqual(plan["pipeline_version"], fl.PIPELINE_VERSION)
             self.assertIn("Total", out)
             self.assertIn("Max frames", out)
-            self.assertIn(str(601 + 91), out)                          # total maximum frames
+            self.assertIn(str(580 + 87), out)                          # total maximum frames
+            self.assertIn("Frames used for two force seconds: 0", out)
 
     def test_per_point_and_single_stride_flags(self):
         with tempfile.TemporaryDirectory() as root:
             make_case(root)
             plan, _ = self.plan(root, "--stride", "A=5", "B=1")
-            self.assertEqual((plan["points"]["A"]["stride"], plan["points"]["A"]["planned_frames"]), (5, 6 * 20 + 1))
-            self.assertEqual((plan["points"]["B"]["stride"], plan["points"]["B"]["planned_frames"]), (1, 91))
+            self.assertEqual((plan["points"]["A"]["stride"], plan["points"]["A"]["planned_frames"]), (5, 5 * 20))
+            self.assertEqual((plan["points"]["B"]["stride"], plan["points"]["B"]["planned_frames"]), (1, 87))
             plan, _ = self.plan(root, "--stride", "7")
             self.assertEqual({p["stride"] for p in plan["points"].values()}, {7})
 
@@ -236,9 +238,28 @@ class TestPlanMeasurements(unittest.TestCase):
     def test_half_window_in_seconds_follows_the_frame_table(self):
         with tempfile.TemporaryDirectory() as root:
             make_case(root)
-            plan, _ = self.plan(root, "--yes", "--half-window-s", "1.0")
-            self.assertEqual(plan["parameters"]["half_window_frames"], 30)
-            self.assertEqual(plan["points"]["A"]["max_frames"], 30 * 19 + 61)
+            plan, _ = self.plan(root, "--yes", "--half-window-s", "0.4")
+            self.assertEqual((plan["parameters"]["half_window_s"], plan["parameters"]["half_window_frames"]), (0.4, 12))
+            self.assertEqual(plan["points"]["A"]["max_frames"], 25 * 20)
+
+    def test_half_window_of_half_a_second_or_more_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            fdir, _ = make_case(root)
+            pm.BASE = Path(root)
+            for seconds in ("0.5", "1.0"):               # 15 and 30 frames: a frame would serve two force seconds
+                with self.assertRaises(SystemExit) as cm:
+                    run_quiet(pm.main, [CASE, "--yes", "--half-window-s", seconds])
+                self.assertIn("largest allowed is 14 frames", str(cm.exception))
+            self.assertFalse(fl.plan_path(fdir, CASE).exists())          # nothing was written
+
+    def test_the_edge_layout_option_is_gone(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_case(root)
+            pm.BASE = Path(root)
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as cm:
+                    run_quiet(pm.main, [CASE, "--yes", "--layout", "edge"])
+            self.assertEqual(cm.exception.code, 2)                       # argparse: unrecognised argument
 
     def test_time_offset_and_buffer_come_from_the_selection_sheet(self):
         with tempfile.TemporaryDirectory() as root:
@@ -296,18 +317,18 @@ class TestMarkerPlanHandling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             fdir, video = self.setup(root)
             out = self.listing(video)
-            self.assertIn("20 force seconds, 61 distinct frames", out)
+            self.assertIn("20 force seconds, 60 distinct frames", out)
             self.assertIn("[buffer-before]", out)
             self.assertIn("[window]", out)
             self.assertIn("[buffer-after]", out)
-            self.assertIn("offsets [-15 -5 +5 +15]", out)
+            self.assertIn("offsets [-10 +0 +10]", out)
 
     def test_command_line_overrides_the_plan(self):
         with tempfile.TemporaryDirectory() as root:
             fdir, video = self.setup(root)
             out = self.listing(video, "--stride", "5")
-            self.assertIn("offsets [-15 -10 -5 +0 +5 +10 +15]", out)
-            self.assertIn("121 distinct frames", out)
+            self.assertIn("offsets [-10 -5 +0 +5 +10]", out)
+            self.assertIn("100 distinct frames", out)
 
     def test_plan_wins_over_stored_parameters(self):
         with tempfile.TemporaryDirectory() as root:
@@ -315,7 +336,29 @@ class TestMarkerPlanHandling(unittest.TestCase):
             store = fl.MarksStore(fdir / f"{CASE}_frame_marks.json", CASE)
             store.note_params("A", fl.resolve_params(stride=2))
             store.save()
-            self.assertIn("offsets [-15 -5 +5 +15]", self.listing(video))
+            self.assertIn("offsets [-10 +0 +10]", self.listing(video))
+
+    def test_half_window_over_the_limit_is_refused_with_instructions(self):
+        with tempfile.TemporaryDirectory() as root:
+            fdir, video = self.setup(root)
+            with self.assertRaises(SystemExit) as cm:
+                self.listing(video, "--half-window-frames", "15")
+            self.assertIn("largest allowed is 14 frames", str(cm.exception))
+            self.assertIn("plan_measurements.py", str(cm.exception))
+
+    def test_a_plan_made_by_2_0_0_is_refused_until_it_is_remade(self):
+        with tempfile.TemporaryDirectory() as root:
+            fdir, video = self.setup(root)
+            path = fl.plan_path(fdir, CASE)
+            old = json.loads(path.read_text())
+            old["pipeline_version"] = "2.0.0"
+            old["parameters"].update({"half_window_s": 0.5, "half_window_frames": 15, "layout": "edge"})
+            path.write_text(json.dumps(old))
+            with self.assertRaises(SystemExit) as cm:
+                self.listing(video)
+            self.assertIn("largest allowed is 14 frames", str(cm.exception))
+            run_quiet(pm.main, [CASE, "--yes"])                         # re-planning fixes it
+            self.assertIn("offsets [-10 +0 +10]", self.listing(video))
 
     def test_missing_plan_or_frame_table_stops_with_instructions(self):
         with tempfile.TemporaryDirectory() as root:
