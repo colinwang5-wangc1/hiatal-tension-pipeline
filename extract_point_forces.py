@@ -83,6 +83,15 @@ def select_rows(force_seconds, start_s, end_s, buffer_s=BUFFER_SECS, time_offset
     return out
 
 
+def leftover_force(rows, arm_lookup):
+    """'USM1 1.7 N, USM3 0.4 N' for the arms with force on the first selected row, or '' if there is none."""
+    if not rows:
+        return ""
+    x = rows[0][0]
+    found = [(arm, vals.get(x)) for arm, vals in arm_lookup.items()]
+    return ", ".join(f"{arm} {v:g} N" for arm, v in found if v is not None and abs(v) > 1e-6)
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description="Select force samples for the measurement windows of each point.")
     ap.add_argument("case_id", nargs="?", help="process only this case (default: every case in the sheet)")
@@ -214,6 +223,13 @@ def main(argv=None):
             print(f"  Point {pt_name}: {start_s:.1f}s–{end_s:.1f}s → {len(rows)} rows "
                   f"({counts['window']} window, {counts['buffer-before']} buffer before, "
                   f"{counts['buffer-after']} buffer after)")
+            leftover = leftover_force(rows, arm_lookup)
+            if leftover:
+                print(f"  WARNING: point {pt_name}: force is already nonzero on the first row ({secs_to_ts(rows[0][0])}): "
+                      f"{leftover}. This is force left over from earlier activity at the start of the buffer. "
+                      "Convention B takes its reference after the window start, so this alone does not make it "
+                      "undefined. Note that a blank arm reading counts as 0 N in the totals and the fits, so a "
+                      "blank row can look like a zero-force row when an arm was simply not logged.")
 
         # The record of what was selected
         ws_sel = wb_out.create_sheet("Selection")

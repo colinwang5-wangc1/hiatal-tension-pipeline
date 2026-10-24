@@ -139,6 +139,24 @@ class TestExtractMain(unittest.TestCase):
             self.assertIn("Point B start", str(cm.exception))
             self.assertIn("Point D end", str(cm.exception))
 
+    def test_warns_when_the_first_row_of_a_point_already_has_force(self):
+        with tempfile.TemporaryDirectory() as root:
+            sheet = self.build(root)                      # USM1 is 1.0 N at every second, USM3 0.5 N at even seconds
+            out = self.extract(root, sheet, "CASE001")
+            self.assertIn("WARNING: point A", out)
+            self.assertIn("first row (00:01:35.000)", out)
+            self.assertIn("USM1 1 N", out)
+            self.assertNotIn("USM3", out.split("WARNING")[1].split("\n")[0])      # x = 95 is odd: USM3 blank (counts as 0)
+            self.assertIn("blank", out)                                          # the reminder that a blank counts as 0 N
+
+    def test_no_warning_when_force_is_zero_at_the_start(self):
+        with tempfile.TemporaryDirectory() as root:
+            sheet = self.build(root)
+            usm1 = [{"x": x, "y": 0.0 if x < 100 else 1.0, "z": None} for x in range(90, 120)]
+            (Path(root) / "Videos" / "CASE001" / "force_data" / "CASE001_force_raw.json").write_text(
+                json.dumps({"USM1": usm1, "USM2": [], "USM3": [], "USM4": []}))
+            self.assertNotIn("WARNING", self.extract(root, sheet, "CASE001"))
+
     def test_missing_tracking_sheet(self):
         with tempfile.TemporaryDirectory() as root:
             ex.BASE = Path(root)

@@ -137,7 +137,9 @@ def main(argv=None, input_fn=input, interactive=None):
                          "force samples (under 0.5 s: at most 14 frames at 30 fps) so that no frame serves two force "
                          "seconds; a larger value is refused [the largest allowed]")
     ap.add_argument("--window-center-shift-s", type=float, default=0.0, dest="window_center_shift_s",
-                    help="shift the window centre, e.g. +0.5 if a sample describes the following second [0]")
+                    help="shift the window centre. The pipeline assumes a force sample at second x is the centre of "
+                         "that second; if the console means the second that starts at x, the frames sit half a "
+                         "second early and +0.5 corrects it. Not verified: see the README, Timing convention [0]")
     ap.add_argument("--yes", action="store_true", help="accept the default stride without asking")
     ap.add_argument("--version", action="version", version=f"%(prog)s {fl.PIPELINE_VERSION}")
     args = ap.parse_args(argv)
