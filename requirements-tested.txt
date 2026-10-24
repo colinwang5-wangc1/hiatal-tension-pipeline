@@ -1,4 +1,4 @@
-# Exact versions of a passing environment for Hiatal Tension Pipeline 2.0.0.
+# Exact versions of a passing environment for Hiatal Tension Pipeline 2.1.0.
 # Made with pip freeze from a fresh virtual environment (nothing inherited) after
 #     pip install -r requirements.txt
 # on Python 3.14, macOS (Apple silicon). The full unit-test suite and the sample-data run passed in it.

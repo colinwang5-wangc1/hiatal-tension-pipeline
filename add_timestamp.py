@@ -31,6 +31,9 @@ if not p.is_file() or not cap.isOpened() or fps <= 0 or total <= 0 or w <= 0 or 
     sys.exit(f"ERROR: cannot read the video: {INPUT}")
 
 writer = cv2.VideoWriter(OUTPUT, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+if not writer.isOpened():
+    sys.exit(f"ERROR: cannot write the output video: {OUTPUT} (is the folder writable? Some OpenCV builds, for example "
+             "opencv-python on Python 3.9 on macOS, have no mp4 writer.)")
 
 print(f"Video: {w}x{h} @ {fps:.0f}fps, {total} frames ({total/fps/3600:.2f}h)")
 print("Processing — this will take a while...\n")

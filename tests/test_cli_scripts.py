@@ -18,6 +18,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from test_index_video import make_video       # a small video made with PyAV
+except ImportError:
+    make_video = None
+
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip()
 ALL_SCRIPTS = ["add_timestamp", "calibrate_reference", "export_calibration_frame", "extract_point_forces",
@@ -68,6 +74,23 @@ class TestAddTimestamp(unittest.TestCase):
                     self.assertIn("cannot read", r.stdout + r.stderr)
                     self.assertNotIn("Done", r.stdout)
                     self.assertFalse((Path(d) / (Path(name).stem + "_timestamped.mp4")).exists())
+
+    @unittest.skipIf(make_video is None or not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs PyAV and a user whose file permissions are enforced")
+    def test_an_output_that_cannot_be_written_is_an_error(self):
+        # the same silent success happened where OpenCV has no mp4 writer (opencv-python on Python 3.9 on macOS)
+        with tempfile.TemporaryDirectory() as d:
+            ro = Path(d) / "readonly"
+            ro.mkdir()
+            make_video(ro / "clip.mp4")
+            os.chmod(ro, 0o555)
+            try:
+                r = run("add_timestamp", str(ro / "clip.mp4"), cwd=d)
+            finally:
+                os.chmod(ro, 0o755)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("cannot write", r.stdout + r.stderr)
+            self.assertNotIn("Done", r.stdout)
 
     def test_a_readable_video_still_works(self):
         with tempfile.TemporaryDirectory() as d:

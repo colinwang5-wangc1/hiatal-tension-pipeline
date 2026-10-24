@@ -60,7 +60,8 @@ citable baseline. Files written by 2.0.0 are still read (same major version), bu
   JSON. Both are now errors with exit status 1.
 - B2 `fit_moduli.py` was hard-wired to `USM1`, `USM3` and the total, so a case on other arms stopped with a `KeyError` and arms 2 and 4 were never fitted.
 - B3 `calibrate_reference.py` printed only "Loaded reference ..." and exited 0 when its window was closed without the needed clicks.
-- B4 `add_timestamp.py` printed "Done. 0 frames written" and exited 0 for a video it could not read (including `--help`, which it read as a file name).
+- B4 `add_timestamp.py` printed "Done. 0 frames written" and exited 0 for a video it could not read (including `--help`, which it read as a file name). It also reported success when it
+  could not write its output, as on Python 3.9 on macOS where the OpenCV build has no mp4 writer, and now stops with an error.
 - B5 `parse_force_api.py`, `calibrate_reference.py`, `measure_hiatal_position.py`, `measure_suture.py` and `verify_force.py` did not handle
   `--help` (an error, or a traceback for `measure_suture.py`); an unreadable image is now an error instead of a traceback in the image tools.
   `verify_force.py` answers `--help` and `--version` on any system.

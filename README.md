@@ -37,6 +37,7 @@ real data. It contains no patient data: everything is generated, and the true an
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate                  # Windows: .venv\Scripts\activate
+python3 -m pip install --upgrade pip       # needed on Python 3.9, whose environment ships a pip too old for current packages
 pip install -r requirements.txt
 python3 -m unittest discover -s tests      # unit tests (one to two minutes)
 python3 examples/run_sample.py             # the whole pipeline on the sample case (under a minute)
@@ -238,7 +239,7 @@ covers it), or (b) the camera has moved between the first frame and the time the
 frame number, its stored video time and whether it is in the window or the buffer, and beside it the default first frame so
 camera movement is easy to see. Keys: left/right one frame, shift+left/right ten frames, down/up one second, `d` back to the
 default, Enter exports the frame, `q` quits without exporting. You can move through the window and its buffer. The exported file
-is marked as not the default. (`export_calibration_frame.py --frame N` does the same non-interactively.)
+records whether the frame is the default. (`export_calibration_frame.py --frame N` does the same non-interactively.)
 
 **Landmark clicks, point by point.** In the per-point calibration window a panel on the right shows the previous reference frame
 with its two landmark marks numbered in the order they were clicked: point A shows the ruler frame, B shows A's, C shows B's and D
@@ -414,11 +415,15 @@ If one arm is logged and the other is not for the same second, that second's tot
 
 ## Dependencies
 
-**Python 3.9 or newer.** The full test suite, including the sample-data run, passed in fresh virtual environments (nothing
-inherited) installed from `requirements.txt` alone, on Python 3.9, 3.10, 3.12 and 3.14 (macOS, Apple silicon). Other
-platforms have not been tested.
+**Python 3.9 or newer.** For version 2.1.0 the full test suite, including the sample-data run, passed in fresh virtual
+environments (nothing inherited) installed from `requirements.txt` alone, on Python 3.9, 3.10, 3.12 and 3.14 (macOS, Apple
+silicon). The Python 3.9 environment resolves to exactly the minimum versions in the table below (numpy 2.0.2, scipy 1.13.1,
+matplotlib 3.9.4, pandas 2.3.3, av 15.1.0, pillow 11.3.0), so the minimums are tested; one test is skipped there because the
+OpenCV build for that Python has no mp4 writer (see below). Other platforms have not been tested.
 
 ```bash
+python3 -m pip install --upgrade pip               # first: on Python 3.9 the environment's own pip (20.2) cannot read current
+                                                   # wheel names, tries to build scipy from source and fails
 pip install -r requirements.txt                    # everything the pipeline needs
 pip install -r requirements-optional-macos.txt     # only for verify_force.py, on macOS
 ```
@@ -430,7 +435,7 @@ pip install -r requirements-optional-macos.txt     # only for verify_force.py, o
 | `scipy` | 1.13 | `fit_moduli` | curve fitting |
 | `matplotlib` | 3.9 | `mark_suture_entry`, `calibrate_reference`, `measure_hiatal_position`, `measure_suture`, `fit_moduli` | the interactive windows and the plots |
 | `av` (PyAV) | 15 | `index_video`, `mark_suture_entry`, `export_calibration_frame`, `pick_calibration_frame`, the sample case | reading each frame's stored timestamp and decoding frames exactly. Bundles FFmpeg's libraries, so no separate FFmpeg install is needed |
-| `pillow` | 8.0 | `export_calibration_frame`, `pick_calibration_frame` | the lossless PNG of an exact frame (matplotlib already needs it) |
+| `pillow` | 11.3 | `export_calibration_frame`, `pick_calibration_frame` | the lossless PNG of an exact frame (matplotlib already needs it) |
 | `opencv-python` | 5.0 | `calibrate_reference`, `measure_hiatal_position`, `measure_suture`, `add_timestamp`, `verify_force` | reading images |
 | `pandas` | 2.3 | `parse_force_api`, `verify_force` | tables |
 | `pyobjc-framework-Cocoa`, `pyobjc-framework-Vision` | latest | `verify_force` only (macOS only, optional) | Apple's Vision framework for OCR |
@@ -446,6 +451,8 @@ and `requirements-optional-macos.txt`. Older versions than the minimums may work
   everything except the clicking tools.
 - On macOS, `opencv-python` and PyAV each bundle their own FFmpeg. Importing both in one Python process prints an Objective-C
   "implemented in both" warning and can be unstable. No script in this pipeline imports both; keep it that way in your own scripts.
+- `opencv-python` on Python 3.9 (macOS) is built without FFmpeg: it reads images and videos but cannot write an mp4. Only the
+  optional `add_timestamp.py` writes a video, and it stops with an error there instead of reporting success. Nothing else is affected.
 - `verify_force.py` is an optional, macOS-only diagnostic. It stops with a clear message on other systems.
 
 ## Data availability
