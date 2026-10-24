@@ -39,14 +39,17 @@ draw window points filled and buffer points hollow. Outputs are named by row set
     <case_id>_moduli_table_<rows>.xlsx    and    plots/<case_id>_point<X>_model_fits_<rows>.png
 The strain reference (widest gap, force onset) is taken from the rows used.
 
-Convention B reference (--onset): the zero-strain gap is the gap at the last zero-force row before the force
-first becomes nonzero (first-rise, the definition in the Methods). Version 1.0.0 instead took the zero-force row
-with the smallest gap (smallest-gap), which differs whenever the force trace returns to zero after loading, for
-example when an instrument is released; that rule is available for comparison. A Convention B fit needs at
-least 3 points.
+Convention B reference (--onset): the zero-strain gap is the gap at the last zero-force row before the first
+nonzero row at or after the noted window start (window-rise, the default since version 2.1.0). It is found for
+each channel (USM1, USM3, Total) on its own. Rows before it may be buffer rows, so force left over from earlier
+activity in the buffer no longer makes the reference undefined. It is undefined only when no row is nonzero from
+the window start on, or no zero row comes before that first nonzero row. With --rows window the rule reduces to
+first-rise (version 2.0.0: the last zero-force row before the force first becomes nonzero anywhere in the rows),
+which stays selectable, as does smallest-gap (version 1.0.0: the zero-force row with the smallest gap, which
+differs whenever the force returns to zero after loading). A Convention B fit needs at least 3 points.
 
 Usage:
-    python3 fit_moduli.py <case_id> [--rows all|window] [--onset first-rise|smallest-gap]
+    python3 fit_moduli.py <case_id> [--rows all|window] [--onset window-rise|first-rise|smallest-gap]
 """
 
 import argparse
@@ -146,38 +149,55 @@ def fit_all(eps, force):
     return out
 
 
-ONSET_RULES = ("first-rise", "smallest-gap")
+ONSET_RULES = ("window-rise", "first-rise", "smallest-gap")
+ONSET_TEXT = {
+    "window-rise": "the last zero-force row before the first nonzero row at or after the noted window start",
+    "first-rise": "version 2.0.0 rule: the last zero-force row before the force first becomes nonzero in the rows used",
+    "smallest-gap": "version 1.0.0 rule: the zero-force row with the smallest gap",
+}
 MIN_B_POINTS = 3      # a straight-line fit through 2 points has R2 = 1 whatever the data
 
 
-def onset_index(dist, force, rule="first-rise"):
+def onset_index(dist, force, rule="window-rise", roles=None):
     """Convention B: row index of the zero-strain reference, or None when it is undefined.
 
-    first-rise (default; the definition in the Methods): the last zero-force row before the force first
-    becomes nonzero. Rows are in time order. Undefined if the force is nonzero from the first row or never
-    nonzero.
-    smallest-gap (the rule of version 1.0.0): the zero-force row with the smallest gap. It gives the same
-    answer only when the force is zero before loading and nowhere after. A force trace that returns to zero
-    later (for example when the instrument is released) moves the reference to the end of the window.
+    Rows are in time order and each channel (USM1, USM3, Total) is treated on its own.
+    window-rise (default): the last zero-force row before the first nonzero row at or after the noted
+    window start (the first row with role "window"). Rows before it may be buffer rows, and nonzero rows
+    in the buffer (force left over from earlier activity) do not matter. Undefined when no row is nonzero
+    from the window start on, or when no zero row comes before that first nonzero row. Without roles every
+    row counts as a window row.
+    first-rise (version 2.0.0): the last zero-force row before the force first becomes nonzero anywhere in
+    the rows. Undefined if the first row is already nonzero, so one leftover nonzero row in the buffer
+    makes it undefined. It equals window-rise when every row is a window row (--rows window).
+    smallest-gap (version 1.0.0): the zero-force row with the smallest gap. It gives the same answer only
+    when the force is zero before loading and nowhere after. A force trace that returns to zero later (for
+    example when the instrument is released) moves the reference to the end of the window.
     """
     zero = np.isclose(force, 0.0, atol=1e-6)
     if rule == "smallest-gap":
         z = np.flatnonzero(zero)
         return None if len(z) == 0 else int(z[np.argmin(dist[z])])
-    nonzero = np.flatnonzero(~zero)
-    if len(nonzero) == 0 or nonzero[0] == 0:
+    start = 0
+    if rule == "window-rise" and roles is not None:
+        start = next((i for i, r in enumerate(roles) if r == "window"), None)
+        if start is None:
+            return None
+    rising = np.flatnonzero(~zero[start:]) + start
+    if len(rising) == 0:
         return None
-    return int(nonzero[0] - 1)
+    before = np.flatnonzero(zero[:rising[0]])
+    return int(before[-1]) if len(before) else None
 
 
-def convention_b(dist, force, max_dist, rule="first-rise"):
+def convention_b(dist, force, max_dist, rule="window-rise", roles=None):
     """Convention B reference: None, or {oi, d0 (deformation at onset), L0 (gap at onset), keep (rows kept)}."""
-    oi = onset_index(dist, force, rule)
+    oi = onset_index(dist, force, rule, roles)
     if oi is None:
         return None
     deform = max_dist - dist
     d0 = float(deform[oi])
-    keep = (np.arange(len(dist)) >= oi) if rule == "first-rise" else (deform >= d0 - 1e-9)
+    keep = (deform >= d0 - 1e-9) if rule == "smallest-gap" else (np.arange(len(dist)) >= oi)
     return {"oi": oi, "d0": d0, "L0": float(max_dist - d0), "keep": keep}
 
 
@@ -187,9 +207,11 @@ def parse_args(argv):
     ap.add_argument("--rows", choices=["all", "window"], default="all",
                     help="all = every measured row (window and buffer); window = only rows between the "
                          "noted start and end [all]")
-    ap.add_argument("--onset", choices=list(ONSET_RULES), default="first-rise",
-                    help="Convention B reference: first-rise = last zero-force row before the force first becomes "
-                         "nonzero (the Methods definition); smallest-gap = the version 1.0.0 rule [first-rise]")
+    ap.add_argument("--onset", choices=list(ONSET_RULES), default="window-rise",
+                    help="Convention B reference: window-rise = last zero-force row before the first nonzero row at "
+                         "or after the noted window start, per channel; first-rise = last zero-force row before the "
+                         "force first becomes nonzero anywhere in the rows (version 2.0.0); smallest-gap = the "
+                         "version 1.0.0 rule [window-rise]")
     ap.add_argument("--version", action="version", version=f"%(prog)s {fl.PIPELINE_VERSION}")
     return ap.parse_args(argv)
 
@@ -222,11 +244,13 @@ def main(argv=None):
             fitA = fit_all(epsA, force)
 
             # Convention B: strain from force onset, trimmed
-            cb = convention_b(d["dist"], force, max_dist, args.onset)
+            cb = convention_b(d["dist"], force, max_dist, args.onset, d["role"])
             if cb is None:
                 fitB = None
-                b_note = ("no zero-force point — B undefined" if args.onset == "smallest-gap"
-                          else "no zero-force row before the force first rises — B undefined")
+                b_note = {"smallest-gap": "no zero-force point — B undefined",
+                          "first-rise": "no zero-force row before the force first rises — B undefined",
+                          "window-rise": "no zero-force row before the rise at the noted start — B undefined",
+                          }[args.onset]
             else:
                 keep = cb["keep"]
                 epsB = (deform[keep] - cb["d0"]) / cb["L0"]
@@ -250,7 +274,7 @@ def main(argv=None):
     print("\nDone.")
 
 
-def write_table(results, rows_mode="all", onset="first-rise"):
+def write_table(results, rows_mode="all", onset="window-rise"):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Moduli"
@@ -291,10 +315,8 @@ def write_table(results, rows_mode="all", onset="first-rise"):
     ws.append([])
     ws.append([f"Rows used: {rows_label}. Pipeline version {fl.PIPELINE_VERSION}. Fits use the per-force-second "
                "mean distance."])
-    ws.append([f"Convention B reference rule: {onset} "
-               + ("(the last zero-force row before the force first becomes nonzero)" if onset == "first-rise"
-                  else "(version 1.0.0 rule: the zero-force row with the smallest gap)")
-               + f". A Convention B fit needs at least {MIN_B_POINTS} points."])
+    ws.append([f"Convention B reference rule: {onset} ({ONSET_TEXT[onset]}). "
+               f"A Convention B fit needs at least {MIN_B_POINTS} points."])
     out = BASE / "Videos" / case_id / "force_data" / f"{case_id}_moduli_table_{rows_mode}.xlsx"
     wb.save(out)
     print(f"Saved table: {out}")
@@ -349,7 +371,7 @@ def _frame_cloud(frames, pt, secs, force, ref, mask=None):
     return np.array(fx), np.array(fy)
 
 
-def plot_overlays(results, wb, frames=None, rows_mode="all", onset="first-rise"):
+def plot_overlays(results, wb, frames=None, rows_mode="all", onset="window-rise"):
     """One figure per point: 2 rows (Convention A / B) x 3 channels (USM1, USM3, Total)."""
     frames = frames or {}
     plots_dir = BASE / "Videos" / case_id / "plots"

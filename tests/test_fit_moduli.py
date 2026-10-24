@@ -36,17 +36,19 @@ def gap(t, start):
     return 40.0 - 4.0 * (t - start)        # mm, closing at 4 mm/s
 
 
-def rows_for(start):
-    """(force second, role, USM1) for one point."""
+def rows_for(start, leftover=False):
+    """(force second, role, USM1) for one point. leftover: 1.7 N still on the first buffer row, from earlier activity."""
     out = []
     for j in range(-BUF, N_SEC + BUF):
         role = "buffer-before" if j < 0 else ("window" if j < N_SEC else "buffer-after")
         f1 = 0.0 if j < 2 else 0.8 * (j - 1)          # zero force until the 2nd window second, then rising
+        if leftover and j == -BUF:
+            f1 = 1.7
         out.append((start + j, role, f1))
     return out
 
 
-def build_case(root, idx, params):
+def build_case(root, idx, params, leftover=False):
     fdir = Path(root) / "Videos" / CASE / "force_data"
     fdir.mkdir(parents=True)
     wb = openpyxl.Workbook()
@@ -56,7 +58,7 @@ def build_case(root, idx, params):
     for label, start in STARTS.items():
         ws = wb.create_sheet(f"Point {label}")
         ws.append(["Timestamp", "Seconds", "USM1", "USM3", "In Window", "Role"])
-        rows = rows_for(start)
+        rows = rows_for(start, leftover)
         for x, role, f1 in rows:
             ws.append([fl.fmt_time(x), float(x), f1, 0.5 * f1, "YES" if role == "window" else "", role])
         store.note_params(label, params)
@@ -114,6 +116,52 @@ class TestConventionB(unittest.TestCase):
         b = fm.convention_b(self.dist, force, 40.0, "smallest-gap")
         self.assertEqual(a["d0"], b["d0"])
         self.assertTrue(np.array_equal(a["keep"], b["keep"]))
+
+    # roles for a 10-row point: the first 4 rows are buffer, the window starts at row 4
+    roles = np.array(["buffer-before"] * 4 + ["window"] * 6)
+
+    def test_window_rise_ignores_leftover_force_in_the_buffer(self):
+        # point D of the real test case: 1.7 N left over on the first row, zeros after it, the rise one row after the window start
+        force = np.array([1.7, 0, 0, 0, 0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertIsNone(fm.onset_index(self.dist, force, "first-rise"))               # stops at the leftover row
+        self.assertEqual(fm.onset_index(self.dist, force, "window-rise", self.roles), 4)
+        cb = fm.convention_b(self.dist, force, 40.0, "window-rise", self.roles)
+        self.assertEqual((cb["oi"], int(cb["keep"].sum())), (4, 6))
+
+    def test_window_rise_may_put_the_reference_in_the_buffer(self):
+        # force already rising in the buffer when the window starts: the last zero row before the
+        # first nonzero row at the window start is the buffer row before the buffer's own rise
+        force = np.array([0.0, 0, 0.5, 0.6, 0.7, 1.0, 2.0, 3.0, 4.0, 5.0])
+        self.assertEqual(fm.onset_index(self.dist, force, "window-rise", self.roles), 1)
+        self.assertEqual(fm.onset_index(self.dist, force, "first-rise"), 1)
+
+    def test_window_rise_uses_the_rise_at_the_noted_start_not_an_earlier_blip(self):
+        # a 0.8 N blip in the buffer, then zeros, then the real rise at the window start (point C of the test case)
+        force = np.array([0.0, 0.8, 0, 0, 0, 0, 1.0, 2.0, 3.0, 4.0])
+        self.assertEqual(fm.onset_index(self.dist, force, "first-rise"), 0)             # before the blip
+        self.assertEqual(fm.onset_index(self.dist, force, "window-rise", self.roles), 5)
+
+    def test_window_rise_undefined_cases(self):
+        self.assertIsNone(fm.onset_index(self.dist, np.ones(10), "window-rise", self.roles))   # nonzero from row 0 on
+        force = np.array([1.0, 1, 1, 1, 1, 1.0, 2.0, 3.0, 4.0, 5.0])                           # nonzero from the first row to the end
+        self.assertIsNone(fm.onset_index(self.dist, force, "window-rise", self.roles))
+        zeros_from_start = np.array([0.5, 0.5, 0, 0, 0, 0, 0, 0, 0, 0])                        # no rise from the window start on
+        self.assertIsNone(fm.onset_index(self.dist, zeros_from_start, "window-rise", self.roles))
+        self.assertIsNone(fm.onset_index(self.dist, np.zeros(10), "window-rise", self.roles))  # never nonzero
+        no_window = np.array(["buffer-before"] * 10)
+        self.assertIsNone(fm.onset_index(self.dist, self.force, "window-rise", no_window))      # no window row at all
+
+    def test_window_rise_equals_first_rise_when_every_row_is_a_window_row(self):
+        # --rows window: the rows start at the noted start, so the two rules agree
+        for force in (self.force, np.array([0.0, 0, 0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]), np.ones(10)):
+            expected = fm.onset_index(self.dist, force, "first-rise")
+            self.assertEqual(fm.onset_index(self.dist, force, "window-rise"), expected)
+            self.assertEqual(fm.onset_index(self.dist, force, "window-rise", np.array(["window"] * 10)), expected)
+
+    def test_window_rise_is_the_default_rule(self):
+        self.assertEqual(fm.ONSET_RULES[0], "window-rise")
+        self.assertEqual(fm.parse_args(["case1"]).onset, "window-rise")
+        self.assertEqual(fm.parse_args(["case1", "--onset", "smallest-gap"]).onset, "smallest-gap")
 
     def test_undefined_cases(self):
         self.assertIsNone(fm.onset_index(self.dist, np.ones(10), "first-rise"))          # nonzero from the first row
@@ -188,6 +236,33 @@ class TestFitChain(unittest.TestCase):
             text = " ".join(str(c.value) for row in table.iter_rows() for c in row if c.value is not None)
             self.assertIn("window rows only", text)
             self.assertIn(fl.PIPELINE_VERSION, text)
+            self.assertIn("Convention B reference rule: window-rise", text)
+
+    def test_default_rule_survives_a_leftover_nonzero_buffer_row(self):
+        params = fl.resolve_params(stride=10)
+        with tempfile.TemporaryDirectory() as root:
+            fdir = build_case(root, self.idx, params, leftover=True)
+            self.run_chain(root)                                            # default: window-rise
+            row = self.table_row(fdir, "all", "A", "USM1")
+            self.assertIsNotNone(row["B: Linear E (N)"])
+            self.assertIn("onset@", row["B note"])
+            self.run_chain(root, "--onset", "first-rise")                   # the earlier rule stops at the leftover row
+            row = self.table_row(fdir, "all", "A", "USM1")
+            self.assertIsNone(row["B: Linear E (N)"])
+            self.assertIn("B undefined", row["B note"])
+            table = openpyxl.load_workbook(fdir / f"{CASE}_moduli_table_all.xlsx").active
+            text = " ".join(str(c.value) for r in table.iter_rows() for c in r if c.value is not None)
+            self.assertIn("Convention B reference rule: first-rise", text)
+
+    def test_rows_window_gives_the_same_reference_under_both_rules(self):
+        params = fl.resolve_params(stride=10)
+        with tempfile.TemporaryDirectory() as root:
+            fdir = build_case(root, self.idx, params, leftover=True)
+            self.run_chain(root, "--rows", "window")
+            a = self.table_row(fdir, "window", "A", "USM1")
+            self.run_chain(root, "--rows", "window", "--onset", "first-rise")
+            b = self.table_row(fdir, "window", "A", "USM1")
+            self.assertEqual((a["B: Linear E (N)"], a["B note"]), (b["B: Linear E (N)"], b["B note"]))
 
     def test_plots_still_work_without_the_frame_table(self):
         params = fl.resolve_params(stride=10)
