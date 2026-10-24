@@ -48,7 +48,7 @@ def rows_for(start, leftover=False):
     return out
 
 
-def build_case(root, idx, params, leftover=False):
+def build_case(root, idx, params, leftover=False, arms=("USM1", "USM3")):
     fdir = Path(root) / "Videos" / CASE / "force_data"
     fdir.mkdir(parents=True)
     wb = openpyxl.Workbook()
@@ -57,10 +57,11 @@ def build_case(root, idx, params, leftover=False):
     store.set_video(idx)
     for label, start in STARTS.items():
         ws = wb.create_sheet(f"Point {label}")
-        ws.append(["Timestamp", "Seconds", "USM1", "USM3", "In Window", "Role"])
+        ws.append(["Timestamp", "Seconds", *arms, "In Window", "Role"])
         rows = rows_for(start, leftover)
-        for x, role, f1 in rows:
-            ws.append([fl.fmt_time(x), float(x), f1, 0.5 * f1, "YES" if role == "window" else "", role])
+        for x, role, f1 in rows:       # the first arm carries f1, every other arm half of it
+            ws.append([fl.fmt_time(x), float(x), *[f1 if i == 0 else 0.5 * f1 for i in range(len(arms))],
+                       "YES" if role == "window" else "", role])
         store.note_params(label, params)
         plan = fl.plan_point(idx, [x for x, _, _ in rows], **params)
         for k in plan.frames:
@@ -237,6 +238,23 @@ class TestFitChain(unittest.TestCase):
             self.assertIn("window rows only", text)
             self.assertIn(fl.PIPELINE_VERSION, text)
             self.assertIn("Convention B reference rule: window-rise", text)
+
+    def test_channels_follow_the_arms_in_the_workbook(self):
+        params = fl.resolve_params(stride=10)
+        for arms in (("USM1", "USM2"), ("USM2", "USM4"), ("USM1", "USM2", "USM3", "USM4")):
+            with self.subTest(arms=arms), tempfile.TemporaryDirectory() as root:
+                fdir = build_case(root, self.idx, params, arms=arms)
+                self.run_chain(root)
+                table = openpyxl.load_workbook(fdir / f"{CASE}_moduli_table_all.xlsx").active
+                channels = {r[1] for r in table.iter_rows(min_row=2, values_only=True) if r[0] in list("ABCD")}
+                self.assertEqual(channels, set(arms) | {"Total"})
+                first, second = (self.table_row(fdir, "all", "A", a)["A: Linear E (N)"] for a in arms[:2])
+                self.assertAlmostEqual(second, 0.5 * first, places=2)          # each arm reads its own column
+                total = self.table_row(fdir, "all", "A", "Total")["A: Linear E (N)"]
+                self.assertAlmostEqual(total, first * (1 + 0.5 * (len(arms) - 1)), places=2)
+                for p in "ABCD":
+                    self.assertGreater((Path(root) / "Videos" / CASE / "plots"
+                                        / f"{CASE}_point{p}_model_fits_all.png").stat().st_size, 10_000)
 
     def test_default_rule_survives_a_leftover_nonzero_buffer_row(self):
         params = fl.resolve_params(stride=10)

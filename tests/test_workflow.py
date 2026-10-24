@@ -139,14 +139,58 @@ class TestExtractMain(unittest.TestCase):
             self.assertIn("Point B start", str(cm.exception))
             self.assertIn("Point D end", str(cm.exception))
 
-    def test_missing_tracking_sheet_and_missing_json(self):
+    def test_missing_tracking_sheet(self):
         with tempfile.TemporaryDirectory() as root:
             ex.BASE = Path(root)
             with self.assertRaises(SystemExit):
                 self.extract(root, Path(root) / "nope.xlsx")
+
+    def out_path(self, root, case="CASE001"):
+        return Path(root) / "Videos" / case / "force_data" / f"{case}_points_ABCD_force.xlsx"
+
+    def test_a_named_case_that_is_not_in_the_sheet_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            sheet = self.build(root)
+            with self.assertRaises(SystemExit) as cm:
+                self.extract(root, sheet, "NOT-A-CASE")
+            self.assertEqual(cm.exception.code.split(":")[0], "ERROR")             # a message, so the exit code is 1
+            self.assertIn("NOT-A-CASE", cm.exception.code)
+            self.assertIn("not in the tracking sheet", cm.exception.code)
+            self.assertFalse(self.out_path(root).exists())
+
+    def test_a_named_case_without_a_force_json_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
             sheet = self.build(root)
             (Path(root) / "Videos" / "CASE001" / "force_data" / "CASE001_force_raw.json").unlink()
-            self.assertIn("force JSON not found", self.extract(root, sheet, "CASE001"))
+            with self.assertRaises(SystemExit) as cm:
+                self.extract(root, sheet, "CASE001")
+            self.assertIn("force JSON not found", cm.exception.code)
+            self.assertIn("parse_force_api", cm.exception.code)
+            self.assertFalse(self.out_path(root).exists())
+
+    def test_a_named_case_with_no_points_defined_is_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.build(root)
+            sheet = openpyxl.Workbook()
+            ws = sheet.active
+            ws.append(["Study ID"] + [f"Point {p} {side}" for p in "ABCD" for side in ("start", "end")])
+            ws.append(["CASE001"] + [None] * 8)
+            sheet.save(Path(root) / "empty.xlsx")
+            with self.assertRaises(SystemExit) as cm:
+                self.extract(root, Path(root) / "empty.xlsx", "CASE001")
+            self.assertIn("no points defined", cm.exception.code)
+
+    def test_an_unnamed_run_skips_bad_cases_but_fails_when_nothing_is_written(self):
+        with tempfile.TemporaryDirectory() as root:
+            sheet = self.build(root, cases=("CASE001", "CASE002"))
+            (Path(root) / "Videos" / "CASE002" / "force_data" / "CASE002_force_raw.json").unlink()
+            out = self.extract(root, sheet)                                       # one case written: not an error
+            self.assertIn("CASE002: force JSON not found, skipping", out)
+            self.assertTrue(self.out_path(root).exists())
+            (Path(root) / "Videos" / "CASE001" / "force_data" / "CASE001_force_raw.json").unlink()
+            with self.assertRaises(SystemExit) as cm:
+                self.extract(root, sheet)                                         # now nothing can be written
+            self.assertIn("no output was written", cm.exception.code)
 
 
 def make_case(root, with_role=True, offset=0.0, buffer_s=5.0):

@@ -116,12 +116,14 @@ def main(argv=None):
         sys.exit(f"ERROR: {sheet_path.name} is missing required column(s): {', '.join(missing)}.\n"
                  "       The first row must contain: " + ", ".join(required) + " (leave a point's cells empty if it was not measured).")
 
+    seen, written, skipped = False, [], []
     for row in ws.iter_rows(min_row=2, values_only=True):
         case = row[col["Study ID"]]
         if not case:
             continue
         if args.case_id and str(case) != args.case_id:
             continue
+        seen = True
 
         # Check if any points are defined
         points = {}
@@ -135,11 +137,14 @@ def main(argv=None):
 
         if not points:
             print(f"{case}: no points defined, skipping")
+            skipped.append(f"{case}: no points defined (fill in the Point A-D start and end times)")
             continue
 
         json_path = BASE / "Videos" / case / "force_data" / f"{case}_force_raw.json"
         if not json_path.exists():
             print(f"{case}: force JSON not found, skipping")
+            skipped.append(f"{case}: force JSON not found ({json_path.name}; run parse_force_api.py or put the "
+                           f"console export there)")
             continue
 
         # Determine active arms
@@ -227,7 +232,14 @@ def main(argv=None):
 
         out_path = BASE / "Videos" / case / "force_data" / f"{case}_points_ABCD_force.xlsx"
         wb_out.save(out_path)
+        written.append(case)
         print(f"  Saved: {out_path}")
+
+    if args.case_id and not seen:
+        sys.exit(f"ERROR: case {args.case_id!r} is not in the tracking sheet {sheet_path.name} (Study ID column)")
+    if not written:
+        why = "; ".join(skipped) if skipped else "the tracking sheet has no cases"
+        sys.exit(f"ERROR: no output was written ({why})")
 
 
 if __name__ == "__main__":

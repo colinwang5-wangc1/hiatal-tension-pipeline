@@ -2,7 +2,7 @@
 fit_moduli.py — Fit constitutive models to force vs strain for points A–D.
 
 Converts crural deformation to strain and fits candidate models to each of the
-12 curves (4 points × {USM1, USM3, Total}) under two zero-strain conventions.
+curves (4 points × {each logged arm, Total}) under two zero-strain conventions.
 
 Strain definition (per user decision):
     eps = deformation / max_distance,  deformation = max_distance - current_distance
@@ -41,7 +41,7 @@ The strain reference (widest gap, force onset) is taken from the rows used.
 
 Convention B reference (--onset): the zero-strain gap is the gap at the last zero-force row before the first
 nonzero row at or after the noted window start (window-rise, the default since version 2.1.0). It is found for
-each channel (USM1, USM3, Total) on its own. Rows before it may be buffer rows, so force left over from earlier
+each channel (each logged arm, then Total) on its own. Rows before it may be buffer rows, so force left over from earlier
 activity in the buffer no longer makes the reference undefined. It is undefined only when no row is nonzero from
 the window start on, or no zero row comes before that first nonzero row. With --rows window the rule reduces to
 first-rise (version 2.0.0: the last zero-force row before the force first becomes nonzero anywhere in the rows),
@@ -70,7 +70,8 @@ BASE    = Path(__file__).resolve().parent
 case_id = None         # set from the command line by main()
 
 POINTS   = ["A", "B", "C", "D"]
-CHANNELS = ["USM1", "USM3", "Total"]
+ARMS     = ["USM1", "USM2", "USM3", "USM4"]
+CHANNELS = ["USM1", "USM3", "Total"]      # replaced by main() with the arms found in the workbook, then Total
 
 # ---------- models ----------
 def m_linear(eps, m, b):        return m * eps + b
@@ -102,12 +103,25 @@ def load_point(ws, rows_mode="all"):
         "dist":  dist,
         "secs":  np.array([r[col["Seconds"]] for r in rows], float),
         "sd":    np.array([np.nan if sd_col is None or r[sd_col] is None else r[sd_col] for r in rows], float),
-        "USM1":  np.array([r[col["USM1"]] or 0 for r in rows], float),
-        "USM3":  np.array([r[col["USM3"]] or 0 for r in rows], float),
         "Total": np.array([r[col["Total Force (N)"]] for r in rows], float),
         "max_dist": float(np.max(dist)),
     }
+    for arm in ARMS:                      # every arm column the extraction wrote; a blank reading counts as 0 N
+        if arm in col:
+            data[arm] = np.array([r[col[arm]] or 0 for r in rows], float)
     return data
+
+
+def channels_in(wb):
+    """The arms present on every point sheet (in USM order), then Total."""
+    sheets = [wb[f"Point {p}"] for p in POINTS if f"Point {p}" in wb.sheetnames]
+    if not sheets:
+        sys.exit("ERROR: the merged workbook has no point sheets")
+    present = [{c.value for c in ws[1]} for ws in sheets]
+    arms = [a for a in ARMS if all(a in names for names in present)]
+    if not arms:
+        sys.exit("ERROR: no arm columns (USM1 to USM4) found on every point sheet of the merged workbook")
+    return arms + ["Total"]
 
 
 def load_frames():
@@ -161,7 +175,7 @@ MIN_B_POINTS = 3      # a straight-line fit through 2 points has R2 = 1 whatever
 def onset_index(dist, force, rule="window-rise", roles=None):
     """Convention B: row index of the zero-strain reference, or None when it is undefined.
 
-    Rows are in time order and each channel (USM1, USM3, Total) is treated on its own.
+    Rows are in time order and each channel (each logged arm, then Total) is treated on its own.
     window-rise (default): the last zero-force row before the first nonzero row at or after the noted
     window start (the first row with role "window"). Rows before it may be buffer rows, and nonzero rows
     in the buffer (force left over from earlier activity) do not matter. Undefined when no row is nonzero
@@ -228,6 +242,8 @@ def main(argv=None):
     if not merged.exists():
         sys.exit(f"ERROR: {merged.name} not found - run merge_distance_force.py {case_id} first")
     wb = openpyxl.load_workbook(merged)
+    CHANNELS[:] = channels_in(wb)
+    print(f"Channels: {', '.join(CHANNELS)}")
     frames = load_frames()
 
     results = {}   # (point, channel) -> {"A": fit, "B": fit, meta...}
@@ -372,14 +388,14 @@ def _frame_cloud(frames, pt, secs, force, ref, mask=None):
 
 
 def plot_overlays(results, wb, frames=None, rows_mode="all", onset="window-rise"):
-    """One figure per point: 2 rows (Convention A / B) x 3 channels (USM1, USM3, Total)."""
+    """One figure per point: 2 rows (Convention A / B) x one column per channel (each arm, then Total)."""
     frames = frames or {}
     plots_dir = BASE / "Videos" / case_id / "plots"
     plots_dir.mkdir(exist_ok=True)
     rows_label = "all measured rows" if rows_mode == "all" else "window rows only"
 
     for pt in POINTS:
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(2, len(CHANNELS), figsize=(6 * len(CHANNELS), 10))
         fig.suptitle(f"{case_id} — Point {pt}: force vs strain ({rows_label}) — "
                      f"Convention A (top, from widest gap) vs Convention B (bottom, slack trimmed)",
                      fontsize=13, fontweight="bold")
