@@ -193,6 +193,96 @@ class TestExitStatus(unittest.TestCase):
                 quiet(cal.main, [self.img, CASE, "Z"])
 
 
+class TestWindow(unittest.TestCase):
+    """The window glue, driven headlessly: matplotlib's plt.show is replaced by two injected mouse clicks."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        cal.BASE = self.root
+        (self.root / "Videos" / CASE / "force_data").mkdir(parents=True)
+        self.img = write_image(self.root / "a.png", w=200, h=150)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def click_through(self, points):
+        import matplotlib.pyplot as plt
+        from matplotlib.backend_bases import MouseEvent
+        real_show = plt.show
+        seen = {}
+
+        def fake_show(*a, **k):
+            fig = plt.gcf()
+            ax = fig.axes[0]
+            seen["panel"] = len(fig.axes) > 2          # image axes, ruler box, and the reference panel if shown
+            seen["axes_width"] = ax.get_position(original=True).width      # before matplotlib shrinks it to the image shape
+            for x, y in points:
+                px, py = ax.transData.transform((x, y))
+                event = MouseEvent("button_press_event", fig.canvas, px, py, button=1)
+                fig.canvas.callbacks.process("button_press_event", event)
+            seen["title"] = ax.get_title()
+
+        plt.show = fake_show
+        try:
+            return seen
+        finally:
+            self._restore = lambda: setattr(plt, "show", real_show)
+
+    def test_two_landmark_clicks_save_the_calibration(self):
+        seen = self.click_through([(20, 30), (20, 110)])
+        try:
+            img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None, None)
+        finally:
+            self._restore()
+        self.assertTrue(saved)
+        data = json.loads((self.root / "Videos" / CASE / "force_data" / f"{CASE}_A_calibration.json").read_text())
+        self.assertAlmostEqual(data["px_per_mm"], 8.0, delta=0.2)          # 80 px for 10 mm, to the nearest pixel
+        self.assertFalse(seen["panel"])
+        self.assertEqual(seen["axes_width"], 1.0)
+        self.assertTrue(seen["title"].startswith("Done"))
+
+    def test_the_previous_frame_panel_is_drawn_beside_the_frame(self):
+        write_image(self.root / "ruler.png", w=200, h=150)
+        ref = {"name": "the ruler frame", "image": str(self.root / "ruler.png"), "p1": (10, 20), "p2": (150, 90),
+               "missing": None}
+        seen = self.click_through([(20, 30), (20, 110)])
+        try:
+            img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
+            with contextlib.redirect_stdout(io.StringIO()):
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, ref, None)
+        finally:
+            self._restore()
+        self.assertTrue(saved)
+        self.assertTrue(seen["panel"])
+        self.assertLess(seen["axes_width"], 0.8)                              # the frame leaves room for the panel
+
+    def test_a_missing_reference_image_is_shown_as_text_not_an_error(self):
+        ref = {"name": "point A", "image": None, "p1": (1, 2), "p2": (3, 4), "missing": "gone.png"}
+        seen = self.click_through([(20, 30), (20, 110)])
+        try:
+            img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
+            with contextlib.redirect_stdout(io.StringIO()):
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "B", self.img, ref, None)
+        finally:
+            self._restore()
+        self.assertTrue(saved)
+
+    def test_no_clicks_means_nothing_saved(self):
+        seen = self.click_through([])
+        try:
+            img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
+            with contextlib.redirect_stdout(io.StringIO()):
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None, None)
+        finally:
+            self._restore()
+        self.assertFalse(saved)
+        self.assertEqual(list((self.root / "Videos" / CASE / "force_data").iterdir()), [])
+
+
 class TestPreviousReference(unittest.TestCase):
     """The inset: point A shows the ruler frame, B shows A's, C shows B's, D shows C's; the ruler frame when the
     previous point has not been calibrated."""

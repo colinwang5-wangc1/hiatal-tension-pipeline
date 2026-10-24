@@ -271,7 +271,8 @@ def check_half_window(index, half_window_frames):
             f"a half-window of {half_window_frames} frames would let one frame serve two force seconds. "
             f"For this video ({fps:.3f} fps, {fps:.1f} frames between force samples) the largest allowed is "
             f"{limit} frames ({limit * index.mean_gap_s:.3f} s): strictly less than half the spacing. "
-            "Re-run plan_measurements.py with a smaller --half-window-s; marks already made are kept.")
+            "Run plan_measurements.py again (without --half-window-s it uses the largest allowed; a plan made by "
+            "version 2.0.0 used 15). Marks already made are kept.")
 
 
 def layout_offsets(half_window_frames, stride):
