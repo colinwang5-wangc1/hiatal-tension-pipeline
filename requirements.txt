@@ -17,7 +17,10 @@ scipy>=1.13        # curve fitting: fit_moduli
 matplotlib>=3.9   # the interactive windows and the plots: mark_suture_entry, calibrate_reference, measure_hiatal_position, measure_suture, fit_moduli
 
 # --- Video: reads the original video exactly, frame by frame ------------------------------------------
-av>=15           # PyAV (bundles FFmpeg libraries): index_video, mark_suture_entry
+av>=15           # PyAV (bundles FFmpeg libraries): index_video, mark_suture_entry, export_calibration_frame, pick_calibration_frame
+
+# --- Calibration frame export ----------------------------------------------------------------------------
+pillow>=8.0       # lossless PNG of an exact frame: export_calibration_frame, pick_calibration_frame (matplotlib already needs it)
 
 # --- Calibration and image tools -----------------------------------------------------------------------
 opencv-python>=5.0  # image reading: calibrate_reference, measure_hiatal_position, measure_suture, add_timestamp, verify_force

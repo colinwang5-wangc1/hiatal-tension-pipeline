@@ -20,11 +20,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip()
-ALL_SCRIPTS = ["add_timestamp", "calibrate_reference", "extract_point_forces", "fit_moduli", "index_video",
-               "mark_suture_entry", "measure_hiatal_position", "measure_suture", "merge_distance_force",
-               "parse_force_api", "plan_measurements", "verify_force"]
-HELP_SCRIPTS = ["add_timestamp", "calibrate_reference", "measure_hiatal_position", "measure_suture",
-                "parse_force_api", "verify_force"]
+ALL_SCRIPTS = ["add_timestamp", "calibrate_reference", "export_calibration_frame", "extract_point_forces",
+               "fit_moduli", "index_video", "mark_suture_entry", "measure_hiatal_position", "measure_suture",
+               "merge_distance_force", "parse_force_api", "pick_calibration_frame", "plan_measurements",
+               "verify_force"]
+HELP_SCRIPTS = ["add_timestamp", "calibrate_reference", "export_calibration_frame", "measure_hiatal_position",
+                "measure_suture", "parse_force_api", "pick_calibration_frame", "verify_force"]
 
 
 def run(script, *args, cwd):

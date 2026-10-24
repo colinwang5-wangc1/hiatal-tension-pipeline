@@ -441,6 +441,64 @@ def selected_force_rows(workbook_path, label):
     return out, legacy
 
 
+# ------------------------------------------------------- point segments -------
+
+def parse_hms(text):
+    """'HH:MM:SS', 'HH:MM:SS.mmm' or plain seconds -> seconds. ValueError for anything else."""
+    parts = str(text).strip().split(":")
+    try:
+        if len(parts) == 1:
+            return float(parts[0])
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except ValueError:
+        pass
+    raise ValueError(f"not a time (use HH:MM:SS): {text!r}")
+
+
+def read_selection(workbook_path):
+    """{point: {start_s, end_s, start_text, end_text, buffer_s, time_offset_s}} from the Selection sheet that
+    extract_point_forces.py writes (video times, as entered). {} when the workbook has no such sheet."""
+    import openpyxl
+    wb = openpyxl.load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        if "Selection" not in wb.sheetnames:
+            return {}
+        rows = wb["Selection"].iter_rows(values_only=True)
+        headers = list(next(rows))
+        col = {h: i for i, h in enumerate(headers)}
+        out = {}
+        for r in rows:
+            if r[0] not in ("A", "B", "C", "D"):
+                continue
+            out[r[0]] = {"start_s": parse_hms(r[col["Start (as entered)"]]),
+                         "end_s": parse_hms(r[col["End (as entered)"]]),
+                         "start_text": str(r[col["Start (as entered)"]]), "end_text": str(r[col["End (as entered)"]]),
+                         "buffer_s": float(r[col["Buffer (s)"]]), "time_offset_s": float(r[col["Time offset (s)"]])}
+        return out
+    finally:
+        wb.close()
+
+
+def segment_position(seg, t):
+    """Where video time t lies in a point's segment: window | buffer-before | buffer-after | outside the selected range."""
+    start, end, buf = seg["start_s"], seg["end_s"], seg["buffer_s"]
+    if start <= t <= end:
+        return "window"
+    if start - buf <= t < start:
+        return "buffer-before"
+    if end < t <= end + buf:
+        return "buffer-after"
+    return "outside the selected range"
+
+
+def save_frame_png(rgb, path):
+    """Write an RGB frame as a lossless PNG at its own resolution (Pillow, which matplotlib already needs)."""
+    from PIL import Image
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.ascontiguousarray(rgb)).save(path)
+
+
 # ------------------------------------------------------ measurement plan -------
 
 def plan_path(force_dir, case_id):
