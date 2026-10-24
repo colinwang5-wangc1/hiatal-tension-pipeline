@@ -22,6 +22,7 @@ The plot window uses matplotlib's default interactive backend for your platform.
 MPLBACKEND environment variable (for example TkAgg or QtAgg) to choose another.
 """
 
+import argparse
 import sys
 import json
 import numpy as np
@@ -31,18 +32,21 @@ from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 
+import framelib
+
 BASE     = Path(__file__).resolve().parent
 
-if "--version" in sys.argv[1:]:
-    import framelib
-    print(f"{Path(__file__).name} {framelib.PIPELINE_VERSION}")
-    sys.exit(0)
-if len(sys.argv) < 3:
-    print(__doc__)
-    sys.exit(1)
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("image", help="reference frame showing the full open hiatal opening")
+ap.add_argument("case_id")
+ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+_args = ap.parse_args()
+img_path = _args.image
+case_id  = _args.case_id
 
-img_path = sys.argv[1]
-case_id  = sys.argv[2]
+img_bgr = cv2.imread(str(BASE / img_path))
+if img_bgr is None:
+    sys.exit(f"ERROR: cannot read the image: {img_path}")
 
 # Load calibration (px/mm from base calibration)
 cal_path = BASE / "Videos" / case_id / "force_data" / f"{case_id}_calibration.json"
@@ -54,7 +58,6 @@ with open(cal_path) as f:
 px_per_mm = cal.get("px_per_mm") or cal.get("px_per_mm_ruler")
 print(f"Loaded calibration: {px_per_mm:.2f} px/mm")
 
-img_bgr = cv2.imread(str(BASE / img_path))
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 H, W    = img_rgb.shape[:2]
 

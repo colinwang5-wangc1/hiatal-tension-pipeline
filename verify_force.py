@@ -6,6 +6,7 @@ Usage:
     python3 verify_force.py <screen_recording.mov>
 """
 
+import argparse
 import sys
 import re
 import os
@@ -13,6 +14,20 @@ import cv2
 import tempfile
 import pandas as pd
 from pathlib import Path
+
+import framelib
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("video", help="screen recording of the my.intuitive.com video player")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+    return ap.parse_args(argv)
+
+
+if __name__ == "__main__":
+    ARGS = parse_args()          # --help and --version work without macOS or the Vision packages
+
 try:
     import Vision
     from Foundation import NSURL
@@ -60,11 +75,7 @@ def extract_force_and_timestamp(lines):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-
-    video_path = sys.argv[1]
+    video_path = ARGS.video
     case = input("Case (the case_id used for the other files, e.g. CASE001): ").strip()
 
     cap = cv2.VideoCapture(video_path)

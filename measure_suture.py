@@ -14,6 +14,7 @@ The plot window uses matplotlib's default interactive backend for your platform.
 MPLBACKEND environment variable (for example TkAgg or QtAgg) to choose another.
 """
 
+import argparse
 import sys
 import numpy as np
 import cv2
@@ -21,19 +22,18 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 from pathlib import Path
 
+import framelib
+
 SUTURE_DIAMETER_MM = 0.35  # USP 0 Prolene
 
-if "--version" in sys.argv[1:]:
-    import framelib
-    print(f"{Path(__file__).name} {framelib.PIPELINE_VERSION}")
-    sys.exit(0)
-if len(sys.argv) < 2:
-    print(__doc__)
-    sys.exit(1)
-
-img_path = sys.argv[1]
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("image", help="a frame showing the suture (PNG/TIFF at the video's native resolution)")
+ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+img_path = ap.parse_args().image
 
 img_bgr = cv2.imread(img_path)
+if img_bgr is None:
+    sys.exit(f"ERROR: cannot read the image: {img_path}")
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 clicks = []
