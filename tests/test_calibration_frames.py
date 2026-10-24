@@ -175,6 +175,29 @@ class TestExportCalibrationFrame(unittest.TestCase):
             self.assertTrue(target.exists())
             self.assertTrue(target.with_suffix(".json").exists())
 
+    def test_the_ruler_frame_is_exported_by_frame_number_or_time(self):
+        with tempfile.TemporaryDirectory() as root:
+            video, fdir = build_case(root)
+            quiet(ecf.main, [str(video), CASE, "ruler", "--frame", "40"])
+            path = self.png(root, f"{CASE}_ruler_frame40.png")
+            info = json.loads(path.with_suffix(".json").read_text())
+            self.assertEqual((info["point"], info["frame"], info["default_first_frame"]), ("ruler", 40, None))
+            idx = fl.load_index(fdir, CASE, video)
+            with fl.FrameReader(video, idx) as reader:
+                self.assertTrue(np.array_equal(np.asarray(Image.open(path).convert("RGB")), reader.get(40)))
+            out = quiet(ecf.main, [str(video), CASE, "RULER", "--time", "00:00:01.5"])      # first frame at or after 1.5 s
+            self.assertTrue(self.png(root, f"{CASE}_ruler_frame45.png").exists(), out)
+
+    def test_the_ruler_frame_needs_a_frame_or_a_time_and_a_point_needs_neither_a_time(self):
+        with tempfile.TemporaryDirectory() as root:
+            video, fdir = build_case(root)
+            with self.assertRaises(SystemExit) as cm:
+                quiet(ecf.main, [str(video), CASE, "ruler"])
+            self.assertIn("--frame", str(cm.exception.code))
+            with self.assertRaises(SystemExit) as cm:
+                quiet(ecf.main, [str(video), CASE, "A", "--time", "00:00:01"])
+            self.assertIn("ruler", str(cm.exception.code))
+
     def test_clear_errors(self):
         with tempfile.TemporaryDirectory() as root:
             video, fdir = build_case(root)

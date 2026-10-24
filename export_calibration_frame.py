@@ -16,10 +16,15 @@ Use another frame (--frame N) only when, on the default first frame, (a) the lan
 camera has moved between that frame and the time the forces are collected. pick_calibration_frame.py scrubs the
 segment and exports the frame you choose.
 
-Needs: index_video.py (the frame table) and extract_point_forces.py (the Selection sheet).
+The same tool exports the RULER frame of the full calibration (the frame in which a ruler of known length lies in the
+field): use the point name "ruler" and give its frame number (--frame N) or its video time (--time HH:MM:SS, the first frame at
+or after it). There is no default frame for it.
+
+Needs: index_video.py (the frame table) and, for points A-D, extract_point_forces.py (the Selection sheet).
 
 Usage:
     python3 export_calibration_frame.py <video> <case_id> <point> [--frame N] [--out FILE.png]
+    python3 export_calibration_frame.py <video> <case_id> ruler (--frame N | --time HH:MM:SS) [--out FILE.png]
 
 Writes (default):
     Videos/<case_id>/calibration_frames/<case_id>_<point>_frame<N>.png   and   the same name with .json
@@ -38,6 +43,7 @@ import numpy as np
 import framelib as fl
 
 BASE = Path(__file__).resolve().parent
+RULER = "RULER"
 
 
 def point_segment(force_dir, case_id, label):
@@ -53,10 +59,15 @@ def point_segment(force_dir, case_id, label):
     return segs[label]
 
 
+def first_frame_at_or_after(index, t):
+    """Index of the first frame whose stored time is at or after t (a microsecond of slack), or index.n if none."""
+    return int(np.searchsorted(index.pts_s, t - 1e-6))
+
+
 def default_frame(index, seg):
     """The first frame of the segment: the first frame whose stored time is at or after the noted window start
     (a frame before the start is not in the segment). A frame within a microsecond before it counts as on it."""
-    k = int(np.searchsorted(index.pts_s, seg["start_s"] - 1e-6))
+    k = first_frame_at_or_after(index, seg["start_s"])
     if k >= index.n:
         sys.exit(f"ERROR: the window start {seg['start_text']} is after the last frame of the video")
     return k
@@ -66,7 +77,7 @@ def export_frame(video, index, case_id, label, seg, frame, out=None):
     """Decode frame `frame` exactly, write the PNG and its .json. Returns (png path, info dict)."""
     if not 0 <= frame < index.n:
         sys.exit(f"ERROR: frame {frame} is outside the video (0 to {index.n - 1})")
-    k0 = default_frame(index, seg)
+    k0 = default_frame(index, seg) if seg else None
     t = float(index.pts_s[frame])
     with fl.FrameReader(video, index) as reader:
         rgb = reader.get(frame)
@@ -75,10 +86,12 @@ def export_frame(video, index, case_id, label, seg, frame, out=None):
     info = {
         "pipeline_version": fl.PIPELINE_VERSION, "case": case_id, "point": label, "video": Path(video).name,
         "frame": int(frame), "video_time_s": round(t, 6), "video_time": fl.fmt_time(t),
-        "default_first_frame": frame == k0, "default_frame": int(k0),
-        "position": fl.segment_position(seg, t),
-        "seconds_from_window_start": round(t - seg["start_s"], 3),
-        "window": {"start": seg["start_text"], "end": seg["end_text"], "buffer_s": seg["buffer_s"]},
+        "default_first_frame": None if seg is None else frame == k0,
+        "default_frame": None if seg is None else int(k0),
+        "position": None if seg is None else fl.segment_position(seg, t),
+        "seconds_from_window_start": None if seg is None else round(t - seg["start_s"], 3),
+        "window": None if seg is None else {"start": seg["start_text"], "end": seg["end_text"],
+                                            "buffer_s": seg["buffer_s"]},
         "crc32": f"{fl.frame_crc32(rgb):08x}", "width": int(rgb.shape[1]), "height": int(rgb.shape[0]),
         "exported": fl.utc_now(),
     }
@@ -90,10 +103,13 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video", help="the original video the frame table was made from")
     ap.add_argument("case_id")
-    ap.add_argument("point", type=str.upper, choices=list("ABCD"))
+    ap.add_argument("point", type=str.upper, choices=list("ABCD") + [RULER],
+                    help="A-D: that point's calibration frame; ruler: the ruler frame of the full calibration")
     ap.add_argument("--frame", type=int, default=None,
                     help="raw frame number to export instead of the first frame of the segment "
-                         "(only when the landmark is hidden there or the camera moved)")
+                         "(points: only when the landmark is hidden there or the camera moved; ruler: required unless --time)")
+    ap.add_argument("--time", default=None, type=str,
+                    help="ruler only: video time HH:MM:SS(.mmm); the first frame at or after it is exported")
     ap.add_argument("--out", default=None, help="output PNG [Videos/<case_id>/calibration_frames/...]")
     ap.add_argument("--version", action="version", version=f"%(prog)s {fl.PIPELINE_VERSION}")
     return ap.parse_args(argv)
@@ -107,6 +123,25 @@ def main(argv=None):
         sys.exit(f"ERROR: video not found: {video}")
     force_dir = BASE / "Videos" / case_id / "force_data"
     index = fl.load_index(force_dir, case_id, video)
+    if label == RULER:
+        label = "ruler"
+        if (args.frame is None) == (args.time is None):
+            sys.exit("ERROR: for the ruler frame give exactly one of --frame N (a frame number) or --time HH:MM:SS")
+        if args.time is not None:
+            try:
+                frame = first_frame_at_or_after(index, fl.parse_hms(args.time))
+            except ValueError as e:
+                sys.exit(f"ERROR: {e}")
+        else:
+            frame = args.frame
+        png, info = export_frame(video, index, case_id, label, None, frame, args.out)
+        print(f"Ruler frame: frame {info['frame']}, video time {info['video_time']}, {info['width']} x {info['height']}, "
+              f"CRC32 {info['crc32']}")
+        print(f"Saved: {png}")
+        print(f"Next: python3 calibrate_reference.py \"{png}\" {case_id}")
+        return
+    if args.time is not None:
+        sys.exit("ERROR: --time is only for the ruler frame; use --frame N to choose a frame of a point")
     seg = point_segment(force_dir, case_id, label)
     frame = default_frame(index, seg) if args.frame is None else args.frame
     png, info = export_frame(video, index, case_id, label, seg, frame, args.out)
