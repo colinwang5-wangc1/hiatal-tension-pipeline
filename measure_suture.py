@@ -10,22 +10,29 @@ Instructions:
     3. Measures the suture width in pixels using the blue channel FWHM
     4. Outputs pixels/mm calibration factor (based on 0 Prolene = 0.35mm)
 
+The plot window uses matplotlib's default interactive backend for your platform. Set the
+MPLBACKEND environment variable (for example TkAgg or QtAgg) to choose another.
 """
 
+import argparse
 import sys
 import numpy as np
 import cv2
-import matplotlib
-matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Button
 
+import framelib
+
 SUTURE_DIAMETER_MM = 0.35  # USP 0 Prolene
 
-img_path = sys.argv[1] if len(sys.argv) > 1 else \
-    "Videos/YV003/clips/frame_A_090.png"
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("image", help="a frame showing the suture (PNG/TIFF at the video's native resolution)")
+ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+img_path = ap.parse_args().image
 
 img_bgr = cv2.imread(img_path)
+if img_bgr is None:
+    sys.exit(f"ERROR: cannot read the image: {img_path}")
 img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
 clicks = []

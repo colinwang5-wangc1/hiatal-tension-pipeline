@@ -22,11 +22,14 @@ Output:
     One combined Excel file: <patient_id>_all_arms_force.xlsx
 """
 
+import argparse
 import json
 import sys
 import os
 import pandas as pd
 from pathlib import Path
+
+import framelib
 
 
 def seconds_to_hms(seconds: int) -> str:
@@ -60,17 +63,22 @@ def parse_arm(arm_name: str, data: list) -> pd.DataFrame:
     return df
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("input", help="raw force JSON exported from my.intuitive.com")
+    ap.add_argument("patient_id", nargs="?", help="case ID used to name the output files [the input file name]")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+    return ap.parse_args(argv)
 
-    json_path = Path(sys.argv[1])
+
+def main(argv=None):
+    args = parse_args(argv)
+    json_path = Path(args.input)
     if not json_path.exists():
         print(f"Error: file not found: {json_path}")
         sys.exit(1)
 
-    patient_id = sys.argv[2] if len(sys.argv) > 2 else json_path.stem
+    patient_id = args.patient_id if args.patient_id else json_path.stem
     out_dir = json_path.parent
 
     with open(json_path) as f:
@@ -107,7 +115,8 @@ def main():
         cols = ["Timestamp", "Seconds", "Force (N)", "Arm", "Instrument", "Sensitivity"]
         df[cols].to_excel(xlsx_path, index=False)
         df[cols].to_csv(csv_path, index=False)
-        print(f"    Saved: {xlsx_path.name}")
+        print(f"    Saved: {xlsx_path}")
+        print(f"    Saved: {csv_path}")
 
         df["Arm"] = arm_name
         all_dfs.append(df[cols])

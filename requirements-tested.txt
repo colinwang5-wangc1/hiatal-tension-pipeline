@@ -1,0 +1,22 @@
+# Exact versions of a passing environment for Hiatal Tension Pipeline 3.0.0.
+# Made with pip freeze from a fresh virtual environment (nothing inherited) after
+#     pip install -r requirements.txt
+# on Python 3.14, macOS (Apple silicon). The full unit-test suite and the sample-data run passed in it.
+# To reproduce it:   pip install -r requirements-tested.txt
+av==19.0.2
+contourpy==1.4.0
+cycler==0.12.1
+et_xmlfile==2.0.0
+fonttools==4.67.0
+kiwisolver==1.5.1
+matplotlib==3.11.2
+numpy==2.5.4
+opencv-python==5.0.0.93
+openpyxl==3.1.5
+packaging==26.3
+pandas==3.1.0
+pillow==13.0.0
+pyparsing==3.3.3
+python-dateutil==3.0.0
+six==1.17.0
+tzdata==2026.5

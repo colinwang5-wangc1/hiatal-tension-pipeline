@@ -7,15 +7,17 @@ Usage:
 Output is saved as <input>_timestamped.mp4 in the same folder.
 """
 
+import argparse
 import sys
 import cv2
 from pathlib import Path
 
-if len(sys.argv) < 2:
-    print(__doc__)
-    sys.exit(1)
+import framelib
 
-INPUT  = sys.argv[1]
+ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+ap.add_argument("video", help="input video")
+ap.add_argument("--version", action="version", version=f"%(prog)s {framelib.PIPELINE_VERSION}")
+INPUT  = ap.parse_args().video
 p      = Path(INPUT)
 OUTPUT = str(p.parent / (p.stem + "_timestamped.mp4"))
 
@@ -25,7 +27,13 @@ w    = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 h    = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+if not p.is_file() or not cap.isOpened() or fps <= 0 or total <= 0 or w <= 0 or h <= 0:
+    sys.exit(f"ERROR: cannot read the video: {INPUT}")
+
 writer = cv2.VideoWriter(OUTPUT, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+if not writer.isOpened():
+    sys.exit(f"ERROR: cannot write the output video: {OUTPUT} (is the folder writable? Some OpenCV builds, for example "
+             "opencv-python on Python 3.9 on macOS, have no mp4 writer.)")
 
 print(f"Video: {w}x{h} @ {fps:.0f}fps, {total} frames ({total/fps/3600:.2f}h)")
 print("Processing — this will take a while...\n")
@@ -55,4 +63,7 @@ while True:
 
 cap.release()
 writer.release()
+if i == 0:
+    Path(OUTPUT).unlink(missing_ok=True)
+    sys.exit(f"ERROR: cannot read the video: {INPUT} (no frames could be decoded)")
 print(f"\nDone. {i} frames written to:\n{OUTPUT}")
