@@ -7,7 +7,7 @@ Every kept row is measured later, and each row is labelled with its role:
     window         between the noted start and end
     buffer-before  in the buffer before the start
     buffer-after   in the buffer after the end
-so buffer rows can be kept as data but left out of an analysis (fit_moduli.py --rows window).
+so buffer rows can be kept as data but left out of an analysis (filter the Role column).
 
 Times in the sheet are VIDEO time (what a media player shows). A force sample x is at video time
 x + time_offset_s (video time minus force time; 0 unless the two clocks are known to differ).
@@ -227,9 +227,8 @@ def main(argv=None):
             if leftover:
                 print(f"  WARNING: point {pt_name}: force is already nonzero on the first row ({secs_to_ts(rows[0][0])}): "
                       f"{leftover}. This is force left over from earlier activity at the start of the buffer. "
-                      "Convention B takes its reference after the window start, so this alone does not make it "
-                      "undefined. Note that a blank arm reading counts as 0 N in the totals and the fits, so a "
-                      "blank row can look like a zero-force row when an arm was simply not logged.")
+                      "Note that a blank arm reading counts as 0 N in the total, so a blank row can look like "
+                      "a zero-force row when an arm was simply not logged.")
 
         # The record of what was selected
         ws_sel = wb_out.create_sheet("Selection")

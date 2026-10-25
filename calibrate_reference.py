@@ -3,30 +3,26 @@ calibrate_reference.py — Establish pixel/mm calibration using anatomical landm
 
 Two modes:
 
-  FULL MODE (calibration frame with ruler):
+  FULL MODE (calibration frame with a ruler in the field):
     Step 1: Click two ruler tick marks → type known mm → get px/mm
     Step 2: Click two blood vessel landmarks → records distance in mm (ground truth)
     Usage: python3 calibrate_reference.py <image> <case_id>
-    This mode also writes the calibration columns (px_per_mm_ruler, landmark_mm, ...) into the row of
-    the case in the tracking sheet IN PLACE, with no backup; the calibration JSON holds the same
-    results, and nothing later reads those columns.
+    The results are saved in <case_id>_calibration.json only. (Version 2.x also wrote five columns into the
+    tracking sheet in place; nothing read them and they are gone.)
 
   LANDMARK-ONLY MODE (the calibration frame of each point A-D, no ruler):
-    Just click the two blood vessels. Uses the known landmark_mm from
-    <case_id>_calibration.json to compute px/mm for this frame's depth. A small panel on the right shows
-    the previous reference frame with its two landmark marks (point A shows the ruler frame, B shows A's,
-    C shows B's, D shows C's; the ruler frame when the previous point is not calibrated yet), so the same
-    two vessels are clicked in the same order.
+    Just click the two blood vessels. Uses the known landmark_mm from <case_id>_calibration.json to compute
+    px/mm for this frame's depth. A panel on the right shows the previous reference frame enlarged around its two
+    landmark marks (point A shows the ruler frame, B shows A's, C shows B's, D shows C's; the ruler frame when the
+    previous point is not calibrated yet), so the same two vessels are clicked in the same order.
     Usage: python3 calibrate_reference.py <image> <case_id> <point>
 
-The calibration frame of a point is the FIRST frame of that point's segment (the window start in the
-tracking sheet): later frames may already show the tissue deformed by pulling. Export it exactly, at the
-video's native resolution, with export_calibration_frame.py. If the landmarks are not visible there, or the
-camera has moved before the forces are collected, pick another frame with pick_calibration_frame.py. The
-frame used is recorded in the calibration JSON (frame_info), so deviations can be found afterwards.
+Choose each point's calibration frame by scrubbing its window and buffer with pick_calibration_frame.py, which exports it
+exactly, at the video's native resolution (export_calibration_frame.py does it without scrubbing, on the first frame of
+the buffer). The frame used is recorded in the calibration JSON (frame_info). A still made by hand has no such record.
 
 Examples:
-    python3 calibrate_reference.py Videos/<case_id>/calibration_frame.png <case_id>
+    python3 calibrate_reference.py Videos/<case_id>/calibration_frames/<case_id>_ruler_frame<N>.png <case_id>
     python3 calibrate_reference.py Videos/<case_id>/calibration_frames/<case_id>_A_frame<N>.png <case_id> A
 
 The plot window uses matplotlib's default interactive backend for your platform. Set the
@@ -41,17 +37,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import openpyxl
 
 import framelib as fl
 
 BASE = Path(__file__).resolve().parent
 PIPELINE_VERSION = fl.PIPELINE_VERSION
 POINTS = "ABCD"
-
-
-def default_sheet():
-    return BASE / "Hiatal tension patients.xlsx"
 
 
 # ------------------------------------------------------------ click logic -----
@@ -131,8 +122,8 @@ def read_frame_info(img_path):
         return None
 
 
-def save_calibration(session, case_id, label, img_path, tracking_sheet=None):
-    """Write the calibration JSON (and, in full mode, the tracking-sheet columns). Returns the JSON path."""
+def save_calibration(session, case_id, label, img_path):
+    """Write the calibration JSON. Returns its path."""
     r = session.result
     px_per_mm = r["px_per_mm"]
     landmark_only = session.landmark_mm is not None
@@ -162,90 +153,19 @@ def save_calibration(session, case_id, label, img_path, tracking_sheet=None):
     with open(out_json, "w") as f:
         json.dump(cal, f, indent=2)
     print(f"Saved: {out_json}")
-
-    if not landmark_only:
-        sheet = Path(tracking_sheet) if tracking_sheet else default_sheet()
-        if not sheet.exists():
-            print(f"Note: tracking sheet not found ({sheet}); the results are in the calibration JSON only.")
-        else:
-            update_tracking_sheet(sheet, case_id, px_per_mm, r)
-            print("Updated the tracking sheet (in place, no backup)")
     return out_json
-
-
-def update_tracking_sheet(sheet_path, case_id, px_per_mm, r):
-    wb = openpyxl.load_workbook(sheet_path)
-    ws = wb.active
-    headers = [cell.value for cell in ws[1]]
-
-    def get_or_add_col(name):
-        if name in headers:
-            return headers.index(name) + 1
-        col = len(headers) + 1
-        ws.cell(row=1, column=col, value=name)
-        headers.append(name)
-        return col
-
-    col_pxmm = get_or_add_col("px_per_mm_ruler")
-    col_mmpx = get_or_add_col("mm_per_px_ruler")
-    col_lmk_px = get_or_add_col("landmark_px")
-    col_lmk_mm = get_or_add_col("landmark_mm")
-    col_ruler_mm = get_or_add_col("ruler_distance_mm")
-
-    for row in ws.iter_rows(min_row=2):
-        if row[0].value == case_id:
-            row[col_pxmm - 1].value = round(px_per_mm, 4)
-            row[col_mmpx - 1].value = round(1 / px_per_mm, 6)
-            row[col_lmk_px - 1].value = round(r["landmark_px"], 2)
-            row[col_lmk_mm - 1].value = round(r["landmark_mm"], 4)
-            row[col_ruler_mm - 1].value = r["ruler_mm"]
-            break
-    wb.save(sheet_path)
 
 
 # ------------------------------------------------------ the previous frame -----
 
-def resolve_image(path, base=None):
-    """An image path as stored in a calibration JSON (absolute, or relative to the repository folder or to
-    the working directory), or None if no such file exists."""
-    base = BASE if base is None else Path(base)
-    p = Path(path)
-    for candidate in ([p] if p.is_absolute() else [base / p, Path.cwd() / p]):
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
 def previous_reference(case_id, label, base=None):
-    """The frame to show beside the one being calibrated: the previous point's (A shows the ruler frame, B shows
-    A's, C shows B's, D shows C's), else the ruler frame when the previous point has no calibration yet.
-
-    Returns {name, image (path or None), p1, p2, missing (stored path when the image is gone)} or None."""
-    base = BASE if base is None else Path(base)
-    fdir = base / "Videos" / case_id / "force_data"
-    candidates = []
-    if label in POINTS and POINTS.index(label) > 0:
-        prev = POINTS[POINTS.index(label) - 1]
-        candidates.append((f"point {prev}", fdir / f"{case_id}_{prev}_calibration.json"))
-    candidates.append(("the ruler frame", fdir / f"{case_id}_calibration.json"))
-    for name, path in candidates:
-        if not path.exists():
-            continue
-        try:
-            cal = json.loads(path.read_text())
-            p1, p2 = cal["landmark_coords_p1"], cal["landmark_coords_p2"]
-            stored = cal["calibration_frame"]
-        except (OSError, ValueError, KeyError):
-            continue
-        image = resolve_image(stored, base)
-        return {"name": name, "image": image, "p1": tuple(p1), "p2": tuple(p2),
-                "missing": None if image else str(stored)}
-    return None
+    """The frame to show beside the one being calibrated (see framelib.previous_reference)."""
+    return fl.previous_reference(case_id, label, BASE if base is None else base)
 
 
 # ----------------------------------------------------------------- window -----
 
-def run_gui(session, img_rgb, case_id, label, img_path, reference, tracking_sheet):
+def run_gui(session, img_rgb, case_id, label, img_path, reference):
     """Show the frame and take the clicks. Returns True once the calibration is complete and saved."""
     import matplotlib.pyplot as plt
     from matplotlib.widgets import TextBox
@@ -321,7 +241,7 @@ def run_gui(session, img_rgb, case_id, label, img_path, reference, tracking_shee
                             ha="center", bbox=dict(facecolor="black", alpha=0.6))
                 print(f"\nLandmark distance: {r['landmark_px']:.1f} px = {r['landmark_mm']:.2f} mm")
                 print(f"Calibration: {r['px_per_mm']:.2f} px/mm  |  {1 / r['px_per_mm']:.4f} mm/px")
-                save_calibration(session, case_id, label, img_path, tracking_sheet)
+                save_calibration(session, case_id, label, img_path)
                 saved["done"] = True
                 ax.set_title(f"Done — {r['landmark_px']:.0f} px = {r['landmark_mm']:.2f} mm  |  "
                              f"{r['px_per_mm']:.2f} px/mm", fontsize=13, color="white",
@@ -353,23 +273,17 @@ def run_gui(session, img_rgb, case_id, label, img_path, reference, tracking_shee
 
 
 def draw_reference(fig, reference):
-    """The previous reference frame, small, with its two landmark marks numbered in click order."""
-    ax_ref = fig.add_axes([0.79, 0.50, 0.20, 0.42])
-    ax_ref.axis("off")
-    ax_ref.set_title(f"Previous reference: {reference['name']}\nclick the same two vessels, same order",
-                     fontsize=9)
+    """The previous reference frame, enlarged around its two landmark clicks (numbered in click order)."""
+    title = f"Previous reference: {reference['name']}\nclick the same two vessels, same order"
+    panel = (0.79, 0.42, 0.20, 0.50)
     if reference["image"] is None:
-        ax_ref.text(0.5, 0.5, f"image not found:\n{reference['missing']}", ha="center", va="center", fontsize=8,
-                    transform=ax_ref.transAxes, wrap=True)
+        ax = fig.add_axes(panel)
+        ax.axis("off")
+        ax.set_title(title, fontsize=9)
+        ax.text(0.5, 0.5, f"image not found:\n{reference['missing']}", ha="center", va="center", fontsize=8,
+                transform=ax.transAxes, wrap=True)
         return
-    img = cv2.cvtColor(cv2.imread(reference["image"]), cv2.COLOR_BGR2RGB)
-    ax_ref.imshow(img)
-    (x1, y1), (x2, y2) = reference["p1"], reference["p2"]
-    ax_ref.plot([x1, x2], [y1, y2], "-", color="cyan", linewidth=1.2)
-    for n, (x, y) in enumerate(((x1, y1), (x2, y2)), 1):
-        ax_ref.plot(x, y, "+", color="cyan", markersize=12, markeredgewidth=1.5)
-        ax_ref.annotate(str(n), (x, y), color="yellow", fontsize=11, fontweight="bold",
-                        xytext=(6, -6), textcoords="offset points")
+    fl.draw_landmark_crop(fig, panel, fl.load_rgb(reference["image"]), reference["p1"], reference["p2"], title)
 
 
 # ------------------------------------------------------------------- main -----
@@ -380,8 +294,6 @@ def parse_args(argv=None):
     ap.add_argument("case_id")
     ap.add_argument("point", nargs="?", type=str.upper, choices=list(POINTS),
                     help="A-D: landmark-only calibration of that point (needs the ruler calibration first)")
-    ap.add_argument("--tracking-sheet", default=None, dest="tracking_sheet",
-                    help="spreadsheet that the full calibration writes its columns into [Hiatal tension patients.xlsx]")
     ap.add_argument("--version", action="version", version=f"%(prog)s {PIPELINE_VERSION}")
     return ap.parse_args(argv)
 
@@ -406,7 +318,7 @@ def main(argv=None):
 
     reference = previous_reference(case_id, label) if label else None
     session = Calibration(landmark_mm)
-    if run_gui(session, img_rgb, case_id, label, args.image, reference, args.tracking_sheet):
+    if run_gui(session, img_rgb, case_id, label, args.image, reference):
         return
     sys.exit("No calibration saved: the window was closed before the calibration was complete "
              "(the title says Done when it is saved). Run the command again and click both landmarks"

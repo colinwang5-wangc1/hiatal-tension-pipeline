@@ -221,7 +221,7 @@ def main(argv=None, input_fn=input, interactive=None):
         print(f"(not an interactive terminal: using the default stride {DEFAULT_STRIDE} for points without --stride)")
     strides = ask_strides(labels, given, summaries, input_fn, interactive, args.yes)
 
-    old = fl.load_plan(force_dir, case_id)
+    old = fl.load_plan(force_dir, case_id, check_version=False)
     points = {}
     print("\nChosen:")
     for label in labels:
@@ -248,14 +248,18 @@ def main(argv=None, input_fn=input, interactive=None):
     }
     out = fl.plan_path(force_dir, case_id)
     if old:
-        print(f"\nReplacing the plan made {old.get('created', '?')}.")
+        print(f"\nReplacing the plan made {old.get('created', '?')} by version {old.get('pipeline_version', '?')}.")
     tmp = out.with_name(out.name + ".tmp")
     with open(tmp, "w") as f:
         json.dump(plan, f, indent=1)
     tmp.replace(out)
     print(f"Saved: {out}")
-    print("Next: calibrate each point (calibrate_reference.py <still> <case_id> <point>), then run "
-          "mark_suture_entry.py <video> <case_id> <point>.")
+    print("Next:\n"
+          f"  1. the ruler frame, once:  python3 export_calibration_frame.py <video> {case_id} ruler --time HH:MM:SS\n"
+          f"                             python3 calibrate_reference.py <the PNG it saved> {case_id}\n"
+          "  2. each point A to D:      python3 pick_calibration_frame.py <video> " + case_id + " <point>   (scrub, Enter on the frame to use)\n"
+          f"                             python3 calibrate_reference.py <the PNG it saved> {case_id} <point>\n"
+          f"  3. then each point:        python3 mark_suture_entry.py <video> {case_id} <point>")
 
 
 if __name__ == "__main__":

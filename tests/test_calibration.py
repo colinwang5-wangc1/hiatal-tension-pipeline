@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import cv2
@@ -36,6 +37,12 @@ def quiet(func, *args, **kw):
     with contextlib.redirect_stdout(buf):
         func(*args, **kw)
     return buf.getvalue()
+
+
+
+def setUpModule():
+    # plt.show() under the headless Agg backend warns that it cannot show the window: expected here, not a failure
+    warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
 
 
 class TestCalibrationSession(unittest.TestCase):
@@ -102,49 +109,41 @@ class TestSaving(unittest.TestCase):
         s.click(0, 0), s.click(0, 60)
         return s
 
-    def test_full_mode_saves_the_json_and_updates_the_tracking_sheet(self):
+    def test_full_mode_saves_the_json_and_leaves_the_tracking_sheet_alone(self):
         img = write_image(self.root / "ruler.png")
-        out = quiet(cal.save_calibration, self.full(img), CASE, None, img, self.sheet)
+        before = self.sheet.read_bytes()
+        out = quiet(cal.save_calibration, self.full(img), CASE, None, img)
         data = json.loads((self.fdir / f"{CASE}_calibration.json").read_text())
         self.assertEqual((data["mode"], data["px_per_mm"], data["clip"]), ("ruler", 5.0, "calibration"))
         self.assertEqual(data["pipeline_version"], cal.PIPELINE_VERSION)
-        ws = openpyxl.load_workbook(self.sheet).active
-        head = [c.value for c in ws[1]]
-        self.assertEqual(ws.cell(row=2, column=head.index("px_per_mm_ruler") + 1).value, 5.0)
-        self.assertIn("Updated the tracking sheet", out)
+        self.assertEqual((data["ruler_mm"], data["landmark_mm"]), (20.0, 12.0))
+        self.assertEqual(self.sheet.read_bytes(), before)                      # version 2.x edited the sheet in place
+        self.assertNotIn("tracking sheet", out)
 
-    def test_a_missing_tracking_sheet_does_not_lose_the_json(self):
-        img = write_image(self.root / "ruler.png")
-        out = quiet(cal.save_calibration, self.full(img), CASE, None, img, self.root / "gone.xlsx")
-        self.assertTrue((self.fdir / f"{CASE}_calibration.json").exists())
-        self.assertIn("tracking sheet not found", out)
-
-    def test_landmark_only_saves_a_per_point_file_and_leaves_the_sheet_alone(self):
+    def test_landmark_only_saves_a_per_point_file(self):
         img = write_image(self.root / "a.png")
         s = cal.Calibration(landmark_mm=12.0)
         s.click(0, 0), s.click(0, 90)
-        before = self.sheet.read_bytes()
-        quiet(cal.save_calibration, s, CASE, "A", img, self.sheet)
+        quiet(cal.save_calibration, s, CASE, "A", img)
         data = json.loads((self.fdir / f"{CASE}_A_calibration.json").read_text())
         self.assertEqual((data["mode"], data["clip"], data["px_per_mm"]), ("landmark_only", "A", 7.5))
-        self.assertEqual(self.sheet.read_bytes(), before)
 
     def test_the_frame_sidecar_is_recorded_so_deviations_can_be_found(self):
         img = write_image(self.root / "A_frame100.png")
         Path(img).with_suffix(".json").write_text(json.dumps(
-            {"frame": 100, "video_time_s": 3.333, "default_first_frame": False, "video": "v.mp4"}))
+            {"frame": 100, "video_time_s": 3.333, "is_default_frame": False, "video": "v.mp4"}))
         s = cal.Calibration(landmark_mm=12.0)
         s.click(0, 0), s.click(0, 90)
-        quiet(cal.save_calibration, s, CASE, "A", img, self.sheet)
+        quiet(cal.save_calibration, s, CASE, "A", img)
         data = json.loads((self.fdir / f"{CASE}_A_calibration.json").read_text())
         self.assertEqual(data["frame_info"]["frame"], 100)
-        self.assertFalse(data["frame_info"]["default_first_frame"])
+        self.assertFalse(data["frame_info"]["is_default_frame"])
 
     def test_a_hand_made_still_has_no_frame_info(self):
         img = write_image(self.root / "still.png")
         s = cal.Calibration(landmark_mm=12.0)
         s.click(0, 0), s.click(0, 90)
-        quiet(cal.save_calibration, s, CASE, "A", img, self.sheet)
+        quiet(cal.save_calibration, s, CASE, "A", img)
         data = json.loads((self.fdir / f"{CASE}_A_calibration.json").read_text())
         self.assertIsNone(data["frame_info"])
 
@@ -169,7 +168,7 @@ class TestExitStatus(unittest.TestCase):
                 if len(argv) == 3:
                     (self.fdir / f"{CASE}_calibration.json").write_text(json.dumps({"landmark_mm": 12.0}))
                 with self.assertRaises(SystemExit) as cm:
-                    quiet(cal.main, [*argv, "--tracking-sheet", str(self.root / "s.xlsx")])
+                    quiet(cal.main, argv)
                 self.assertIn("No calibration saved", str(cm.exception.code))
                 self.assertNotEqual(cm.exception.code, 0)
                 self.assertEqual(sorted(p.name for p in self.fdir.glob("*_calibration.json")),
@@ -186,6 +185,12 @@ class TestExitStatus(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             quiet(cal.main, [self.img, CASE, "A"])                      # no ruler calibration yet
         self.assertIn("calibration", str(cm.exception.code).lower())
+
+    def test_the_tracking_sheet_option_is_gone(self):
+        with self.assertRaises(SystemExit) as cm:
+            with contextlib.redirect_stderr(io.StringIO()):
+                quiet(cal.main, [self.img, CASE, "--tracking-sheet", "x.xlsx"])
+        self.assertEqual(cm.exception.code, 2)
 
     def test_a_point_must_be_a_to_d(self):
         with self.assertRaises(SystemExit):
@@ -235,7 +240,7 @@ class TestWindow(unittest.TestCase):
             img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None, None)
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None)
         finally:
             self._restore()
         self.assertTrue(saved)
@@ -253,7 +258,7 @@ class TestWindow(unittest.TestCase):
         try:
             img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
             with contextlib.redirect_stdout(io.StringIO()):
-                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, ref, None)
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, ref)
         finally:
             self._restore()
         self.assertTrue(saved)
@@ -262,21 +267,21 @@ class TestWindow(unittest.TestCase):
 
     def test_a_missing_reference_image_is_shown_as_text_not_an_error(self):
         ref = {"name": "point A", "image": None, "p1": (1, 2), "p2": (3, 4), "missing": "gone.png"}
-        seen = self.click_through([(20, 30), (20, 110)])
+        self.click_through([(20, 30), (20, 110)])
         try:
             img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
             with contextlib.redirect_stdout(io.StringIO()):
-                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "B", self.img, ref, None)
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "B", self.img, ref)
         finally:
             self._restore()
         self.assertTrue(saved)
 
     def test_no_clicks_means_nothing_saved(self):
-        seen = self.click_through([])
+        self.click_through([])
         try:
             img = cv2.cvtColor(cv2.imread(self.img), cv2.COLOR_BGR2RGB)
             with contextlib.redirect_stdout(io.StringIO()):
-                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None, None)
+                saved = cal.run_gui(cal.Calibration(landmark_mm=10.0), img, CASE, "A", self.img, None)
         finally:
             self._restore()
         self.assertFalse(saved)

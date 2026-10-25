@@ -1,20 +1,21 @@
 """
 export_calibration_frame.py — Export a point's calibration frame, exactly, from the original video.
 
-The calibration frame of each point A-D is the FIRST frame of that point's segment: the first frame whose stored
-time is at or after the window start noted in the tracking sheet (the Selection sheet that
-extract_point_forces.py wrote; a frame before the start is not in the segment). Later frames may
-already show the tissue deformed by pulling, which changes the landmark distance and so the px/mm scale
-(on the test case the choice of frame moved the scale by 4.5% and 7.0% for two points).
+Each point A-D is calibrated on ONE frame, and that frame's px/mm is applied to every frame of the point. Which frame
+is a judgement: the two landmark vessels must be visible, the camera must be steady and as it is for the measured
+frames, and the tissue should not yet be deformed by pulling (that changes the landmark distance and so the px/mm
+scale). The scale also changes inside a segment when the camera moves: on the test case the same operator, landmarks
+and point gave 10.46 px/mm on the first frame of the buffer and 13.29 on the window start, 5 s later.
 
-This script decodes that frame from the ORIGINAL video by its number, with the pipeline's own exact decoder, and
-saves it as a lossless PNG at the video's native resolution, so no screenshot (scaled, re-encoded) is needed.
-Next to the PNG it writes a .json that records which frame it is and whether it is the default; calibrate_reference.py
-copies that into the calibration JSON, so a point that was calibrated on another frame can be found afterwards.
+pick_calibration_frame.py is the normal tool: it scrubs the point's window and buffer and exports the frame you
+choose. This script is the non-interactive version. Without --frame it exports the DEFAULT frame, the first frame of
+the buffer: the first frame whose stored time is at or after the window start minus the buffer (the window start
+itself when there is no buffer), taken from the Selection sheet that extract_point_forces.py wrote.
 
-Use another frame (--frame N) only when, on the default first frame, (a) the landmark is not visible, or (b) the
-camera has moved between that frame and the time the forces are collected. pick_calibration_frame.py scrubs the
-segment and exports the frame you choose.
+It decodes the frame from the ORIGINAL video by its number, with the pipeline's own exact decoder, and saves it as a
+lossless PNG at the video's native resolution, so no screenshot (scaled, re-encoded) is needed. Next to the PNG it
+writes a .json that records which frame it is and whether it is the default (is_default_frame); calibrate_reference.py
+copies that into the calibration JSON (frame_info), so the frame each point was calibrated on can be found afterwards.
 
 The same tool exports the RULER frame of the full calibration (the frame in which a ruler of known length lies in the
 field): use the point name "ruler" and give its frame number (--frame N) or its video time (--time HH:MM:SS, the first frame at
@@ -38,8 +39,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-
 import framelib as fl
 
 BASE = Path(__file__).resolve().parent
@@ -59,17 +58,13 @@ def point_segment(force_dir, case_id, label):
     return segs[label]
 
 
-def first_frame_at_or_after(index, t):
-    """Index of the first frame whose stored time is at or after t (a microsecond of slack), or index.n if none."""
-    return int(np.searchsorted(index.pts_s, t - 1e-6))
-
-
 def default_frame(index, seg):
-    """The first frame of the segment: the first frame whose stored time is at or after the noted window start
-    (a frame before the start is not in the segment). A frame within a microsecond before it counts as on it."""
-    k = first_frame_at_or_after(index, seg["start_s"])
+    """The first frame of the buffer: the first frame whose stored time is at or after the window start minus the buffer
+    (a frame before it is outside the selected range). A frame within a microsecond before it counts as on it."""
+    k = fl.segment_frame_range(index, seg)[0]
     if k >= index.n:
-        sys.exit(f"ERROR: the window start {seg['start_text']} is after the last frame of the video")
+        sys.exit(f"ERROR: the start of the buffer ({seg['start_text']} minus {seg['buffer_s']:g} s) is after the last "
+                 "frame of the video")
     return k
 
 
@@ -86,7 +81,7 @@ def export_frame(video, index, case_id, label, seg, frame, out=None):
     info = {
         "pipeline_version": fl.PIPELINE_VERSION, "case": case_id, "point": label, "video": Path(video).name,
         "frame": int(frame), "video_time_s": round(t, 6), "video_time": fl.fmt_time(t),
-        "default_first_frame": None if seg is None else frame == k0,
+        "is_default_frame": None if seg is None else frame == k0,
         "default_frame": None if seg is None else int(k0),
         "position": None if seg is None else fl.segment_position(seg, t),
         "seconds_from_window_start": None if seg is None else round(t - seg["start_s"], 3),
@@ -106,8 +101,8 @@ def parse_args(argv=None):
     ap.add_argument("point", type=str.upper, choices=list("ABCD") + [RULER],
                     help="A-D: that point's calibration frame; ruler: the ruler frame of the full calibration")
     ap.add_argument("--frame", type=int, default=None,
-                    help="raw frame number to export instead of the first frame of the segment "
-                         "(points: only when the landmark is hidden there or the camera moved; ruler: required unless --time)")
+                    help="raw frame number to export instead of the default, the first frame of the buffer "
+                         "(ruler: required unless --time)")
     ap.add_argument("--time", default=None, type=str,
                     help="ruler only: video time HH:MM:SS(.mmm); the first frame at or after it is exported")
     ap.add_argument("--out", default=None, help="output PNG [Videos/<case_id>/calibration_frames/...]")
@@ -129,7 +124,7 @@ def main(argv=None):
             sys.exit("ERROR: for the ruler frame give exactly one of --frame N (a frame number) or --time HH:MM:SS")
         if args.time is not None:
             try:
-                frame = first_frame_at_or_after(index, fl.parse_hms(args.time))
+                frame = fl.first_frame_at_or_after(index, fl.parse_hms(args.time))
             except ValueError as e:
                 sys.exit(f"ERROR: {e}")
         else:
@@ -148,10 +143,10 @@ def main(argv=None):
 
     print(f"Point {label}: window starts {seg['start_text']} (video time); frame {info['frame']}, "
           f"video time {info['video_time']}, {info['width']} x {info['height']}, CRC32 {info['crc32']}")
-    if info["default_first_frame"]:
-        print("This is the first frame of the segment (the default calibration frame).")
+    if info["is_default_frame"]:
+        print("This is the first frame of the buffer (the default calibration frame).")
     else:
-        print(f"This is not the default (frame {info['default_frame']}, the first frame of the segment): "
+        print(f"This is not the default (frame {info['default_frame']}, the first frame of the buffer): "
               f"{abs(info['seconds_from_window_start']):.2f} s "
               f"{'before' if info['seconds_from_window_start'] < 0 else 'after'} the window start "
               f"({info['position']}). The deviation is recorded in {png.with_suffix('.json').name}.")

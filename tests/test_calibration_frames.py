@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,45 @@ def build_case(root, start="00:00:01", end="00:00:02", buffer_s=0.5):
     return video, fdir
 
 
+
+def setUpModule():
+    # plt.show() under the headless Agg backend warns that it cannot show the window: expected here, not a failure
+    warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
+
+
+class TestReferenceCrop(unittest.TestCase):
+    """The square of the previous reference frame shown around its two landmark clicks (R1)."""
+    SHAPE = (1024, 1280)          # height, width
+
+    def test_square_centred_on_the_midpoint_with_side_three_times_the_landmark_distance(self):
+        x0, x1, y0, y1 = fl.reference_crop(self.SHAPE, (600, 500), (700, 500))        # 100 px apart: side 300
+        self.assertEqual((x1 - x0, y1 - y0), (300, 300))
+        self.assertEqual(((x0 + x1) / 2, (y0 + y1) / 2), (650, 500))
+
+    def test_a_floor_applies_to_close_landmarks(self):
+        x0, x1, y0, y1 = fl.reference_crop(self.SHAPE, (600, 500), (630, 500))        # 30 px apart: 3 x = 90 < 300
+        self.assertEqual((x1 - x0, y1 - y0), (300, 300))
+
+    def test_the_square_is_shifted_to_stay_inside_the_image(self):
+        x0, x1, y0, y1 = fl.reference_crop(self.SHAPE, (20, 30), (80, 90))
+        self.assertEqual((x0, y0), (0, 0))
+        self.assertEqual((x1 - x0, y1 - y0), (300, 300))
+        x0, x1, y0, y1 = fl.reference_crop(self.SHAPE, (1250, 1000), (1270, 1020))
+        self.assertEqual((x1, y1), (1280, 1024))
+        self.assertEqual((x1 - x0, y1 - y0), (300, 300))
+
+    def test_the_square_never_exceeds_the_image(self):
+        x0, x1, y0, y1 = fl.reference_crop((200, 500), (100, 100), (400, 150))        # side would be 912
+        self.assertEqual((x0, x1, y0, y1), (150, 350, 0, 200))                        # limited to the short side, kept inside
+        self.assertTrue(0 <= x0 < x1 <= 500 and 0 <= y0 < y1 <= 200)
+
+    def test_both_landmarks_are_always_inside_the_crop(self):
+        for p1, p2 in (((10, 10), (130, 40)), ((1200, 900), (1100, 980)), ((640, 512), (700, 600))):
+            x0, x1, y0, y1 = fl.reference_crop(self.SHAPE, p1, p2)
+            for x, y in (p1, p2):
+                self.assertTrue(x0 <= x < x1 and y0 <= y < y1, (p1, p2, (x0, x1, y0, y1)))
+
+
 class TestSegmentHelpers(unittest.TestCase):
     def test_parse_hms(self):
         self.assertEqual(fl.parse_hms("02:19:38"), 8378.0)
@@ -108,42 +148,50 @@ class TestExportCalibrationFrame(unittest.TestCase):
     def png(self, root, name):
         return Path(root) / "Videos" / CASE / "calibration_frames" / name
 
-    def test_default_is_the_first_frame_of_the_segment_at_native_resolution(self):
+    def test_default_is_the_first_frame_of_the_buffer_at_native_resolution(self):
         with tempfile.TemporaryDirectory() as root:
-            video, fdir = build_case(root)
+            video, fdir = build_case(root)                                     # window 1 s to 2 s, buffer 0.5 s
             out = quiet(ecf.main, [str(video), CASE, "A"])
-            path = self.png(root, f"{CASE}_A_frame30.png")                     # video time 1.000 s = frame 30
+            path = self.png(root, f"{CASE}_A_frame15.png")                     # buffer start 0.500 s = frame 15
             self.assertTrue(path.exists(), out)
             img = np.asarray(Image.open(path).convert("RGB"))
             self.assertEqual(img.shape, (48, 64, 3))                           # the video's own size
             idx = fl.load_index(fdir, CASE, video)
             with fl.FrameReader(video, idx) as reader:
-                self.assertTrue(np.array_equal(img, reader.get(30)))          # lossless: the decoded frame itself
+                self.assertTrue(np.array_equal(img, reader.get(15)))          # lossless: the decoded frame itself
             info = json.loads(path.with_suffix(".json").read_text())
-            self.assertEqual((info["frame"], info["default_first_frame"], info["default_frame"]), (30, True, 30))
-            self.assertEqual(info["position"], "window")
+            self.assertEqual((info["frame"], info["is_default_frame"], info["default_frame"]), (15, True, 15))
+            self.assertEqual(info["position"], "buffer-before")
             self.assertEqual(info["crc32"], f"{fl.frame_crc32(img):08x}")
             self.assertEqual((info["case"], info["point"], info["pipeline_version"]),
                              (CASE, "A", fl.PIPELINE_VERSION))
-            self.assertIn("first frame of the segment", out)
+            self.assertIn("first frame of the buffer", out)
 
-    def test_the_default_is_never_before_the_noted_start(self):
-        # a start between two frames: 1.010 s lies 10 ms after frame 30 (1.000 s) and 23 ms before frame 31 (1.033 s).
-        # The nearest frame is 30, which is before the segment; the first frame of the segment is 31.
+    def test_the_default_is_never_before_the_start_of_the_buffer(self):
+        # window start 1.010 s, buffer 0.5 s: the buffer starts at 0.510 s, 10 ms after frame 15 (0.500 s) and 23 ms
+        # before frame 16 (0.533 s). The nearest frame is 15, which lies outside; the first frame of the buffer is 16.
         with tempfile.TemporaryDirectory() as root:
             video, fdir = build_case(root, start="00:00:01.010")
             quiet(ecf.main, [str(video), CASE, "A"])
-            path = self.png(root, f"{CASE}_A_frame31.png")
+            path = self.png(root, f"{CASE}_A_frame16.png")
             self.assertTrue(path.exists())
             info = json.loads(path.with_suffix(".json").read_text())
-            self.assertEqual((info["frame"], info["default_first_frame"], info["position"]), (31, True, "window"))
-            self.assertGreaterEqual(info["video_time_s"], 1.010)
+            self.assertEqual((info["frame"], info["is_default_frame"], info["position"]), (16, True, "buffer-before"))
+            self.assertGreaterEqual(info["video_time_s"], 0.510)
 
-    def test_a_start_exactly_on_a_frame_uses_that_frame(self):
+    def test_a_buffer_start_exactly_on_a_frame_uses_that_frame(self):
         with tempfile.TemporaryDirectory() as root:
             video, fdir = build_case(root, start="00:00:01")
             quiet(ecf.main, [str(video), CASE, "A"])
-            self.assertTrue(self.png(root, f"{CASE}_A_frame30.png").exists())
+            self.assertTrue(self.png(root, f"{CASE}_A_frame15.png").exists())
+
+    def test_without_a_buffer_the_default_is_the_window_start(self):
+        with tempfile.TemporaryDirectory() as root:
+            video, fdir = build_case(root, buffer_s=0.0)
+            quiet(ecf.main, [str(video), CASE, "A"])
+            path = self.png(root, f"{CASE}_A_frame30.png")
+            info = json.loads(path.with_suffix(".json").read_text())
+            self.assertEqual((info["frame"], info["is_default_frame"], info["position"]), (30, True, "window"))
 
     def test_another_frame_is_recorded_as_a_deviation(self):
         with tempfile.TemporaryDirectory() as root:
@@ -151,7 +199,7 @@ class TestExportCalibrationFrame(unittest.TestCase):
             out = quiet(ecf.main, [str(video), CASE, "A", "--frame", "20"])
             path = self.png(root, f"{CASE}_A_frame20.png")
             info = json.loads(path.with_suffix(".json").read_text())
-            self.assertEqual((info["frame"], info["default_first_frame"], info["default_frame"]), (20, False, 30))
+            self.assertEqual((info["frame"], info["is_default_frame"], info["default_frame"]), (20, False, 15))
             self.assertEqual(info["position"], "buffer-before")
             self.assertAlmostEqual(info["seconds_from_window_start"], -0.333, places=2)
             self.assertIn("not the default", out)
@@ -165,7 +213,7 @@ class TestExportCalibrationFrame(unittest.TestCase):
             quiet(ecf.main, [str(video), CASE, "A", "--frame", "20"])
             side = self.png(root, f"{CASE}_A_frame20.png").with_suffix(".json")
             info = json.loads(side.read_text())
-            self.assertEqual((info["frame"], info["default_first_frame"]), (20, False))
+            self.assertEqual((info["frame"], info["is_default_frame"]), (20, False))
 
     def test_explicit_output_path(self):
         with tempfile.TemporaryDirectory() as root:
@@ -181,7 +229,7 @@ class TestExportCalibrationFrame(unittest.TestCase):
             quiet(ecf.main, [str(video), CASE, "ruler", "--frame", "40"])
             path = self.png(root, f"{CASE}_ruler_frame40.png")
             info = json.loads(path.with_suffix(".json").read_text())
-            self.assertEqual((info["point"], info["frame"], info["default_first_frame"]), ("ruler", 40, None))
+            self.assertEqual((info["point"], info["frame"], info["is_default_frame"]), ("ruler", 40, None))
             idx = fl.load_index(fdir, CASE, video)
             with fl.FrameReader(video, idx) as reader:
                 self.assertTrue(np.array_equal(np.asarray(Image.open(path).convert("RGB")), reader.get(40)))
@@ -228,20 +276,33 @@ class TestFramePicker(unittest.TestCase):
         seg = fl.read_selection(fdir / f"{CASE}_points_ABCD_force.xlsx")["A"]
         return pcf.FramePicker(idx, seg, **kw), idx
 
-    def test_it_starts_on_the_default_first_frame(self):
+    def test_it_opens_on_the_first_frame_of_the_buffer(self):
         with tempfile.TemporaryDirectory() as root:
             p, idx = self.make(root)
-            self.assertEqual((p.frame, p.default_frame), (30, 30))
+            self.assertEqual((p.frame, p.default_frame), (15, 15))
             self.assertTrue(p.on_default())
             self.assertEqual((p.lo, p.hi), (15, 75))                             # 0.5 s buffer before 1 s and after 2 s
+
+    def test_the_range_ends_are_inside_the_buffered_window(self):
+        # buffer start 0.510 s (between frames 15 at 0.500 and 16 at 0.533) and buffer end 2.525 s (between frames 75 at
+        # 2.500 and 76 at 2.533): the nearest frames 15 and 76 are outside, the range is 16 to 75 (issue 17).
+        with tempfile.TemporaryDirectory() as root:
+            video, fdir = build_case(root, start="00:00:01.010", end="00:00:02.025")
+            idx = fl.load_index(fdir, CASE, video)
+            seg = fl.read_selection(fdir / f"{CASE}_points_ABCD_force.xlsx")["A"]
+            p = pcf.FramePicker(idx, seg)
+            self.assertEqual((p.lo, p.hi), (16, 75))
+            for k in (p.lo, p.hi):
+                self.assertNotEqual(fl.segment_position(seg, float(idx.pts_s[k])), "outside the selected range")
+            self.assertEqual(p.default_frame, 16)
 
     def test_steps_clamp_to_the_selected_range(self):
         with tempfile.TemporaryDirectory() as root:
             p, _ = self.make(root)
             p.step(+1)
-            self.assertEqual(p.frame, 31)
-            p.step(-10)
-            self.assertEqual(p.frame, 21)
+            self.assertEqual(p.frame, 16)
+            p.step(+30)
+            self.assertEqual(p.frame, 46)
             p.step(-100)
             self.assertEqual(p.frame, 15)                                        # not before the buffer
             p.step(+1000)
@@ -251,29 +312,31 @@ class TestFramePicker(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             p, idx = self.make(root)
             p.step_seconds(+1)
-            self.assertEqual(p.frame, 60)                                        # 2.000 s
+            self.assertEqual(p.frame, 45)                                        # 1.500 s
             p.step_seconds(-1)
-            self.assertEqual(p.frame, 30)
+            self.assertEqual(p.frame, 15)
 
-    def test_default_key_returns_to_the_first_frame(self):
+    def test_default_key_returns_to_the_start_of_the_buffer(self):
         with tempfile.TemporaryDirectory() as root:
             p, _ = self.make(root)
             p.step(+25)
             self.assertFalse(p.on_default())
             p.to_default()
-            self.assertEqual(p.frame, 30)
+            self.assertEqual(p.frame, 15)
 
     def test_label_names_time_frame_and_position(self):
         with tempfile.TemporaryDirectory() as root:
             p, idx = self.make(root)
-            self.assertIn("frame 30", p.label())
-            self.assertIn("00:00:01.000", p.label())
-            self.assertIn("window", p.label())
-            self.assertIn("default first frame", p.label())
-            p.step(-10)
+            self.assertIn("frame 15", p.label())
+            self.assertIn("00:00:00.500", p.label())
             self.assertIn("buffer-before", p.label())
-            self.assertIn("0.33 s before the window start", p.label())
-            self.assertNotIn("default first frame", p.label())
+            self.assertIn("start of the buffer", p.label())
+            p.step(+15)
+            self.assertIn("window", p.label())
+            self.assertIn("at the window start", p.label())
+            p.step(+10)
+            self.assertIn("0.33 s after the window start", p.label())
+            self.assertNotIn("start of the buffer", p.label())
 
     def test_keys_move_the_frame_and_enter_exports_it(self):
         with tempfile.TemporaryDirectory() as root:
@@ -284,12 +347,28 @@ class TestFramePicker(unittest.TestCase):
             exported = []
             with fl.FrameReader(video, idx) as reader:
                 fig, on_key, state = pcf.make_window(picker, reader, lambda k: exported.append(k) or f"frame{k}.png")
-                for key, frame in (("right", 31), ("shift+left", 21), ("up", 51), ("down", 21), ("d", 30),
-                                   ("left", 29), ("x", 29)):                       # an unknown key changes nothing
+                for key, frame in (("right", 16), ("shift+right", 26), ("up", 56), ("down", 26), ("d", 15),
+                                   ("right", 16), ("x", 16)):                       # an unknown key changes nothing
                     on_key(type("E", (), {"key": key})())
                     self.assertEqual(picker.frame, frame, key)
                 on_key(type("E", (), {"key": "enter"})())
-            self.assertEqual((exported, state["exported"], state["quit"]), ([29], "frame29.png", False))
+            self.assertEqual((exported, state["exported"], state["quit"]), ([16], "frame16.png", False))
+
+    def test_the_previous_points_calibration_frame_is_shown_zoomed_beside_the_current_frame(self):
+        with tempfile.TemporaryDirectory() as root:
+            video, fdir = build_case(root)
+            idx = fl.load_index(fdir, CASE, video)
+            seg = fl.read_selection(fdir / f"{CASE}_points_ABCD_force.xlsx")["A"]
+            prev_png = Path(root) / "prev.png"
+            Image.fromarray(np.full((480, 640, 3), 90, np.uint8)).save(prev_png)
+            ref = {"name": "the ruler frame", "image": str(prev_png), "p1": (300, 200), "p2": (380, 260), "missing": None}
+            with fl.FrameReader(video, idx) as reader:
+                fig, on_key, state = pcf.make_window(pcf.FramePicker(idx, seg), reader, lambda k: "x", previous=ref)
+                titles = [a.get_title() for a in fig.axes]
+                fig2, _, _ = pcf.make_window(pcf.FramePicker(idx, seg), reader, lambda k: "x")        # no previous frame
+            self.assertTrue(any("the ruler frame" in s for s in titles), titles)
+            self.assertEqual(len(fig.axes), len(fig2.axes) + 2)             # the zoomed panel and its whole-frame thumbnail
+            self.assertTrue(any("Default frame" in s for s in titles), titles)
 
     def test_q_quits_without_exporting(self):
         with tempfile.TemporaryDirectory() as root:
@@ -315,6 +394,7 @@ class TestFramePicker(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             p, _ = self.make(root, start_frame=2)
             self.assertEqual(p.frame, 15)
+            self.assertEqual(pcf.FramePicker(_, p.seg, 500).frame, 75)
 
 
 if __name__ == "__main__":

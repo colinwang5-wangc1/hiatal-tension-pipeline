@@ -43,8 +43,10 @@ class TestSampleCase(unittest.TestCase):
             again = self.run_sample(repo, "--quiet")                       # re-running resumes and gives the same result
             self.assertEqual(again.returncode, 0, again.stdout[-2500:] + again.stderr[-1500:])
             self.assertIn("ALL CHECKS PASSED", again.stdout)
-            self.assertTrue((repo / "Videos" / "SAMPLE001" / "force_data" / "SAMPLE001_moduli_table_all.xlsx").exists())
-            self.assertTrue((repo / "Videos" / "SAMPLE001" / "force_data" / "SAMPLE001_moduli_table_window.xlsx").exists())
+            fd = repo / "Videos" / "SAMPLE001" / "force_data"
+            self.assertTrue((fd / "SAMPLE001_frame_distances.csv").exists())
+            self.assertTrue((fd / "SAMPLE001_points_ABCD_force_merged.xlsx").exists())
+            self.assertEqual(list(fd.glob("*moduli*")), [])                  # the pipeline no longer fits anything
 
     def test_refuses_to_touch_a_folder_that_is_not_a_sample(self):
         with tempfile.TemporaryDirectory() as tmp:

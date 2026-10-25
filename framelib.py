@@ -62,10 +62,13 @@ ROLES = ("window", "buffer-before", "buffer-after")
 
 
 def _read_version():
+    path = Path(__file__).resolve().parent / "VERSION"
     try:
-        return (Path(__file__).resolve().parent / "VERSION").read_text().strip()
+        return path.read_text().strip()
     except OSError:
-        return "unknown"
+        raise SystemExit(f"ERROR: the VERSION file is missing next to framelib.py ({path}). Copy the whole folder, not just "
+                         "the .py files: every output records the version of the code that made it, and a copy without "
+                         "VERSION would silently record 'unknown'.") from None
 
 
 PIPELINE_VERSION = _read_version()
@@ -73,7 +76,7 @@ PIPELINE_VERSION = _read_version()
 
 def check_major_version(stored, what):
     """Refuse files written by a different major version of the pipeline."""
-    if stored is None or PIPELINE_VERSION == "unknown":
+    if stored is None:
         return
     if str(stored).split(".")[0] != PIPELINE_VERSION.split(".")[0]:
         raise SystemExit(f"{what} was written by pipeline version {stored}; this is version {PIPELINE_VERSION}. "
@@ -387,6 +390,22 @@ class MarksStore:
     def delete(self, label, frame):
         self.point(label)["frames"].pop(str(int(frame)), None)
 
+    # -- camera check: scale of each frame's scene relative to the point's calibration frame
+    def set_scale(self, label, frame, scale, inliers):
+        """Store the estimated scale (None when no estimate could be made) and the number of matched features."""
+        self.point(label).setdefault("scale", {})[str(int(frame))] = {
+            "scale": None if scale is None else round(float(scale), 4), "inliers": int(inliers)}
+
+    def get_scale(self, label, frame):
+        return self.data["points"].get(label, {}).get("scale", {}).get(str(int(frame)))
+
+    def set_scale_check(self, label, **meta):
+        """What the camera check was run against (calibration frame and image, thresholds, time)."""
+        self.point(label)["scale_check"] = {**meta, "checked_at": utc_now(), "pipeline_version": PIPELINE_VERSION}
+
+    def get_scale_check(self, label):
+        return self.data["points"].get(label, {}).get("scale_check")
+
     def counts(self, label, frames):
         marked = skipped = 0
         for k in frames:
@@ -493,6 +512,103 @@ def segment_position(seg, t):
     return "outside the selected range"
 
 
+def first_frame_at_or_after(index, t):
+    """Index of the first frame whose stored time is at or after t (a microsecond of slack), or index.n if none."""
+    return int(np.searchsorted(index.pts_s, t - 1e-6))
+
+
+def last_frame_at_or_before(index, t):
+    """Index of the last frame whose stored time is at or before t (a microsecond of slack), or -1 if none."""
+    return int(np.searchsorted(index.pts_s, t + 1e-6, side="right")) - 1
+
+
+def segment_frame_range(index, seg):
+    """(first, last) frame of a point's window plus buffer: the first frame at or after the window start minus the
+    buffer and the last frame at or before the window end plus the buffer, so both lie inside the selected range."""
+    return (first_frame_at_or_after(index, seg["start_s"] - seg["buffer_s"]),
+            last_frame_at_or_before(index, seg["end_s"] + seg["buffer_s"]))
+
+
+def resolve_image(path, base):
+    """An image path as stored in a calibration JSON (absolute, or relative to the repository folder or to the
+    working directory), or None if no such file exists."""
+    p = Path(path)
+    for candidate in ([p] if p.is_absolute() else [Path(base) / p, Path.cwd() / p]):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def previous_reference(case_id, label, base):
+    """The frame to show beside the one being calibrated: the previous point's (A shows the ruler frame, B shows
+    A's, C shows B's, D shows C's), else the ruler frame when the previous point has no calibration yet.
+
+    Returns {name, image (path or None), p1, p2, missing (stored path when the image is gone)} or None."""
+    fdir = Path(base) / "Videos" / case_id / "force_data"
+    candidates = []
+    if label in ("B", "C", "D"):
+        prev = "ABCD"["ABCD".index(label) - 1]
+        candidates.append((f"point {prev}", fdir / f"{case_id}_{prev}_calibration.json"))
+    candidates.append(("the ruler frame", fdir / f"{case_id}_calibration.json"))
+    for name, path in candidates:
+        if not path.exists():
+            continue
+        try:
+            cal = json.loads(path.read_text())
+            p1, p2 = cal["landmark_coords_p1"], cal["landmark_coords_p2"]
+            stored = cal["calibration_frame"]
+        except (OSError, ValueError, KeyError):
+            continue
+        image = resolve_image(stored, base)
+        return {"name": name, "image": image, "p1": tuple(p1), "p2": tuple(p2),
+                "missing": None if image else str(stored)}
+    return None
+
+
+def reference_crop(shape, p1, p2, factor=3.0, floor=300):
+    """(x0, x1, y0, y1): a square of the image centred on the midpoint of two landmark clicks, its side `factor` times
+    their distance (at least `floor` px), shifted to stay inside the image and never larger than its short side."""
+    h, w = shape[:2]
+    dist = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
+    side = int(min(round(max(factor * dist, floor)), h, w))
+    cx, cy = (p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0
+    x0 = int(min(max(round(cx - side / 2.0), 0), w - side))
+    y0 = int(min(max(round(cy - side / 2.0), 0), h - side))
+    return x0, x0 + side, y0, y0 + side
+
+
+def load_rgb(path):
+    """An image file as an RGB uint8 array (Pillow, so no OpenCV is needed)."""
+    from PIL import Image
+    with Image.open(path) as im:
+        return np.asarray(im.convert("RGB"))
+
+
+def draw_landmark_crop(fig, rect, rgb, p1, p2, title):
+    """A reference panel: the square around two landmark clicks, enlarged, with the clicks numbered in order, and a small
+    thumbnail of the whole frame with the square outlined. rect = (left, bottom, width, height) in figure fractions.
+    Returns the two axes."""
+    from matplotlib.patches import Rectangle
+    left, bottom, width, height = rect
+    x0, x1, y0, y1 = reference_crop(rgb.shape, p1, p2)
+    ax = fig.add_axes(rect)
+    ax.imshow(rgb, interpolation="nearest")
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y1, y0)
+    ax.axis("off")
+    ax.set_title(title, fontsize=9)
+    ax.plot([p1[0], p2[0]], [p1[1], p2[1]], "-", color="cyan", linewidth=1.2)
+    for n, (x, y) in enumerate((p1, p2), 1):
+        ax.plot(x, y, "+", color="cyan", markersize=14, markeredgewidth=1.6)
+        ax.annotate(str(n), (x, y), color="yellow", fontsize=12, fontweight="bold",
+                    xytext=(7, -7), textcoords="offset points")
+    thumb = fig.add_axes([left + 0.005, bottom + 0.005, width * 0.36, height * 0.30])
+    thumb.imshow(rgb)
+    thumb.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="yellow", linewidth=1.2))
+    thumb.axis("off")
+    return ax, thumb
+
+
 def save_frame_png(rgb, path):
     """Write an RGB frame as a lossless PNG at its own resolution (Pillow, which matplotlib already needs)."""
     from PIL import Image
@@ -506,8 +622,9 @@ def plan_path(force_dir, case_id):
     return Path(force_dir) / f"{case_id}_measurement_plan.json"
 
 
-def load_plan(force_dir, case_id):
-    """The measurement plan written by plan_measurements.py, or None if there is none."""
+def load_plan(force_dir, case_id, check_version=True):
+    """The measurement plan written by plan_measurements.py, or None if there is none. A plan from another major
+    version is refused unless check_version is False (plan_measurements.py reads the old one only to say it replaces it)."""
     path = plan_path(force_dir, case_id)
     if not path.exists():
         return None
@@ -515,7 +632,8 @@ def load_plan(force_dir, case_id):
         plan = json.load(f)
     if plan.get("schema_version") != PLAN_SCHEMA_VERSION:
         raise SystemExit(f"{path.name}: unsupported schema_version {plan.get('schema_version')}")
-    check_major_version(plan.get("pipeline_version"), path.name)
+    if check_version:
+        check_major_version(plan.get("pipeline_version"), path.name)
     return plan
 
 

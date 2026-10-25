@@ -1,7 +1,9 @@
 """
-merge_distance_force.py — Merge the per-frame crural distance measurements into the
-force workbook, summarise them per force sample, and compute a Total Force column,
-ready for fit_moduli.py.
+merge_distance_force.py — Pair every measured frame's crural distance with the force of its force second.
+
+This is the last stage of the pipeline. Its product is ONE TABLE WITH ONE ROW PER MEASURED FRAME: the frame's
+distance and the force paired with it. Strain, moduli, curves and every other calculation are done by the analyst
+from this table (see the methods paper); the pipeline does not fit anything.
 
 Reads (never modified):
     Videos/<case_id>/force_data/<case_id>_points_ABCD_force.xlsx  (from extract_point_forces.py)
@@ -9,32 +11,42 @@ Reads (never modified):
     Videos/<case_id>/force_data/<case_id>_frame_times.csv         (frame timestamps, from index_video.py)
 
 Writes (new files):
-    Videos/<case_id>/force_data/<case_id>_points_ABCD_force_merged.xlsx
-    Videos/<case_id>/force_data/<case_id>_frame_distances.csv     every planned frame, one row per
-                                                                  (point, force second, frame)
+    Videos/<case_id>/force_data/<case_id>_frame_distances.csv           the per-frame table
+    Videos/<case_id>/force_data/<case_id>_points_ABCD_force_merged.xlsx  the same table as sheet "Frames", plus
+        "Summary <point> (from Frames)"   one row per force second (secondary, derived from the Frames sheet)
+        "Selection"                       what extract_point_forces.py selected
+        "Merge info"                      version, time base, counts, how to read the columns
 
-For each "Point <X>" sheet, every force row gets:
-    Total Force (N)            sum of the active-arm columns (a blank arm counts as 0)
-    Distance (mm)              MEAN over the measured frames of that force second
-    Distance SD (mm)           sample SD across those frames (blank when N < 2)
-    N frames, Frames planned   measured (not skipped) frames / frames planned for it
-    Distance min/max/median (mm), Distance (px)   (px = mean)
-    Fit at x (mm), Slope (mm/s), Fit resid SD (mm)
-                               straight line through distance vs frame time: its value at the
-                               sample time, its slope, and the scatter about it (N >= 3)
-The Role column from extract_point_forces.py (window, buffer-before, buffer-after) is kept, so buffer
-rows stay in the data and can be left out of an analysis (fit_moduli.py --rows window).
+The per-frame table has one row per planned frame of every selected force second (window and buffer), in the order
+point, force second, frame. Columns:
+    case_id, point                  case ID and suture point (A to D)
+    role                            window | buffer-before | buffer-after: where the force second lies relative to the noted window
+    force_second, force_time_hms    the force sample's time in the force log (seconds, and HH:MM:SS)
+    frame                           raw frame number in the video (0 = first frame, in presentation order)
+    pts                             the frame's STORED presentation timestamp, in time-base ticks (an integer, as read from the file)
+    time_s                          (pts - first frame's pts) x time base: the video time a player shows, in seconds
+    time_hms                        the same as HH:MM:SS.mmm
+    offset_frames, offset_ms        the frame's distance from the force second's centre frame, in frames and in ms
+                                    (frame time minus the force sample's target time)
+    status                          marked | skipped | not marked
+    skip_reason                     why a skipped frame was skipped (for example "camera: scale 0.76 vs calibration"); empty otherwise
+    distance_mm, distance_px        the crural distance in millimetres and pixels (empty unless marked)
+    left_x, left_y, right_x, right_y  the two clicks, in pixels (left crus first)
+    px_per_mm                       the scale the distance was converted with (empty unless marked)
+    calibration_frame               the raw frame number of the calibration frame that scale came from (empty if unknown)
+    scale_vs_calibration            the camera check: the scene's scale on this frame relative to the calibration frame
+                                    (1.00 = same zoom; empty if no check was made or no estimate was possible)
+    USM1 ... USM4                   the force of each logged arm in N, as in the force log; BLANK where the log has no sample
+    Total Force (N)                 the sum of the arms, where a blank arm counts as 0 N
 
-How to read the spread: the frames of one force second lie up to +/-0.47 s apart (14 frames at 30 fps), and the
-gap can change by several mm per second, so Distance SD mixes real tissue motion, click
-noise and timing ambiguity. It is a conservative uncertainty of the distance at the
-nominal sample time, not pure measurement error. "Fit resid SD" is closer to click noise.
-With only 3-4 frames per force second any SD is a rough estimate.
+The "Summary ... (from Frames)" sheets are derived from the Frames sheet: for each force second, the mean, SD, N,
+min, max and median of its marked frames' distances, and a straight line through distance against frame time evaluated at
+the sample time. The frames of one force second lie up to +/-0.47 s apart (14 frames at 30 fps), and the gap can change by
+several mm per second, so the SD mixes real tissue motion, click noise and timing ambiguity. It is not pure measurement error.
 
-The frames that belong to each force second come from the same parameters the marks were
-made with (stored in the marks file), or from the options below to re-summarise the same
-frames under another stride, e.g. the sparse subset of a denser pass. A half-window of 15 frames or more
-(the 2.0.0 default) is refused: every frame must belong to one force second (see plan_measurements.py).
+The frames that belong to each force second come from the same parameters the marks were made with (stored in the marks
+file), or from the options below to re-summarise the same frames under another stride, e.g. the sparse subset of a denser
+pass. A half-window of 15 frames or more is refused: every frame must belong to one force second.
 
 Usage:
     python3 merge_distance_force.py <case_id> [--half-window-frames N] [--stride N]
@@ -51,12 +63,19 @@ import numpy as np
 import openpyxl
 from openpyxl.styles import Font
 
+import camera_check as cc
 import framelib as fl
 
 BASE = Path(__file__).resolve().parent
 POINTS = ["A", "B", "C", "D"]
-NEW_COLS = [
-    "Total Force (N)", "Distance (mm)", "Distance SD (mm)", "N frames", "Frames planned",
+ID_COLUMNS = [
+    "case_id", "point", "role", "force_second", "force_time_hms", "frame", "pts", "time_s", "time_hms",
+    "offset_frames", "offset_ms", "status", "skip_reason", "distance_mm", "distance_px",
+    "left_x", "left_y", "right_x", "right_y", "px_per_mm", "calibration_frame", "scale_vs_calibration",
+]
+TOTAL = "Total Force (N)"
+SUMMARY_COLS = [
+    TOTAL, "Distance (mm)", "Distance SD (mm)", "N frames", "Frames planned",
     "Distance min (mm)", "Distance max (mm)", "Distance median (mm)", "Distance (px)",
     "Fit at x (mm)", "Slope (mm/s)", "Fit resid SD (mm)",
 ]
@@ -87,8 +106,14 @@ def r(v, nd=4):
     return None if v is None else round(v, nd)
 
 
+def force_time_hms(x):
+    """HH:MM:SS of a force second (with milliseconds only if the second is not a whole number)."""
+    s = fl.fmt_time(x)
+    return s[:8] if s.endswith(".000") else s
+
+
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="Merge per-frame distances into the force workbook.")
+    ap = argparse.ArgumentParser(description="Pair every measured frame's distance with its force: the per-frame table.")
     ap.add_argument("case_id")
     ap.add_argument("--half-window-frames", dest="half_window_frames", type=int)
     ap.add_argument("--stride", type=int)
@@ -120,7 +145,7 @@ def main(argv=None):
 
     wb = openpyxl.load_workbook(force_path)
     bold = Font(bold=True)
-    csv_rows, info = [], []
+    frame_rows, info, arms = [], [], []
 
     for label in POINTS:
         sheet = f"Point {label}"
@@ -130,7 +155,8 @@ def main(argv=None):
         headers = [c.value for c in ws[1]]
         col = {h: i for i, h in enumerate(headers)}
         arm_cols = [h for h in headers if h not in NOT_ARM]
-        for h in NEW_COLS:
+        arms += [a for a in arm_cols if a not in arms]
+        for h in SUMMARY_COLS:
             c = ws.max_column + 1
             ws.cell(row=1, column=c, value=h).font = bold
             col[h] = c - 1
@@ -143,11 +169,14 @@ def main(argv=None):
             fl.check_half_window(index, params["half_window_frames"])
         except ValueError as e:
             sys.exit(f"ERROR: point {label}: {e}")
-        planned = measured = skipped = unmarked = 0
+        check = store.get_scale_check(label) or {}
+        planned = measured = skipped = unmarked = camera_skips = camera_flags = 0
         with_data = {"window": 0, "buffer": 0}
         for row in ws.iter_rows(min_row=2):
             secs = row[col["Seconds"]].value
-            row[col["Total Force (N)"]].value = sum((row[col[a]].value or 0) for a in arm_cols)
+            forces = {a: row[col[a]].value for a in arm_cols}
+            total = sum((v or 0) for v in forces.values())
+            row[col[TOTAL]].value = total
             if secs is None:
                 continue
             x = round(float(secs), 3)
@@ -161,18 +190,36 @@ def main(argv=None):
             t_target = fl.target_time(x, params)
             for sf in frames:
                 rec = store.get(label, sf.frame)
-                status = "unmarked" if rec is None else ("skipped" if rec.get("skipped") else "marked")
+                status = "not marked" if rec is None else ("skipped" if rec.get("skipped") else "marked")
+                est = store.get_scale(label, sf.frame)
                 if to_measure:
                     planned += 1
                     measured += status == "marked"
                     skipped += status == "skipped"
-                    unmarked += status == "unmarked"
-                    csv_rows.append([
-                        label, x, role, sf.frame, r(index.pts_s[sf.frame], 6), sf.offset_frames, r(sf.offset_ms, 2),
-                        r(rec.get("distance_mm")) if status == "marked" else None,
-                        r(rec.get("distance_px"), 2) if status == "marked" else None,
-                        *(rec["left_crus_px"] + rec["right_crus_px"] if status == "marked" else [None] * 4),
-                        rec.get("px_per_mm") if rec else None, status])
+                    unmarked += status == "not marked"
+                    if status == "skipped" and str(rec.get("skip_reason") or "").startswith("camera"):
+                        camera_skips += 1
+                    if status == "marked" and check and cc.frame_flag(est, check.get("threshold", cc.DEFAULT_THRESHOLD),
+                                                                      check.get("min_inliers", cc.DEFAULT_MIN_INLIERS)):
+                        camera_flags += 1
+                    marked = status == "marked"
+                    t = float(index.pts_s[sf.frame])
+                    frame_rows.append({
+                        "case_id": case_id, "point": label, "role": role, "force_second": x,
+                        "force_time_hms": force_time_hms(x), "frame": sf.frame, "pts": int(index.pts[sf.frame]),
+                        "time_s": r(t, 6), "time_hms": fl.fmt_time(t), "offset_frames": sf.offset_frames,
+                        "offset_ms": r(sf.offset_ms, 2), "status": status,
+                        "skip_reason": rec.get("skip_reason") if status == "skipped" else None,
+                        "distance_mm": r(rec.get("distance_mm")) if marked else None,
+                        "distance_px": r(rec.get("distance_px"), 2) if marked else None,
+                        "left_x": rec["left_crus_px"][0] if marked else None,
+                        "left_y": rec["left_crus_px"][1] if marked else None,
+                        "right_x": rec["right_crus_px"][0] if marked else None,
+                        "right_y": rec["right_crus_px"][1] if marked else None,
+                        "px_per_mm": rec.get("px_per_mm") if marked else None,
+                        "calibration_frame": rec.get("calibration_frame") if marked else None,
+                        "scale_vs_calibration": est.get("scale") if est else None,
+                        **forces, TOTAL: total})
                 if status == "marked":
                     recs.append(rec)
                     t_rel.append(float(index.pts_s[sf.frame]) - t_target)
@@ -190,26 +237,49 @@ def main(argv=None):
                 row[col["Fit at x (mm)"]].value = r(st.get("fit_at_x"))
                 row[col["Slope (mm/s)"]].value = r(st.get("slope"))
                 row[col["Fit resid SD (mm)"]].value = r(st.get("fit_sd"))
-        print(f"  {sheet}: Total Force for all rows; distance summarised for {with_data['window']} window and "
-              f"{with_data['buffer']} buffer force seconds ({measured} frames measured, {skipped} skipped, "
-              f"{unmarked} not yet marked)")
+        ws.title = f"Summary {label} (from Frames)"
+        print(f"  Point {label}: {measured} frames marked, {skipped} skipped, {unmarked} not marked "
+              f"(of {planned} planned); distance summarised for {with_data['window']} window and "
+              f"{with_data['buffer']} buffer force seconds")
         info.append([label, *(params[k] for k in fl.PARAM_DEFAULTS), with_data["window"], with_data["buffer"],
-                     planned, measured, skipped, unmarked])
+                     planned, measured, skipped, unmarked, camera_skips,
+                     camera_flags if check else None])
+
+    columns = ID_COLUMNS + arms + [TOTAL]
+    frame_rows.sort(key=lambda d: (d["point"], d["force_second"], d["frame"]))
+    table = [[d.get(c) for c in columns] for d in frame_rows]
+
+    wf = wb.create_sheet("Frames", 0)
+    wf.append(columns)
+    for c in wf[1]:
+        c.font = bold
+    for line in table:
+        wf.append(line)
+    wf.freeze_panes = "A2"
 
     ws = wb.create_sheet("Merge info")
     ws.append([f"Pipeline version {fl.PIPELINE_VERSION}. Per-point parameters and frame counts (frames counted over the "
                "force seconds that are measured; every frame belongs to one force second)"])
     ws.append(["Point", *fl.PARAM_DEFAULTS.keys(), "Window seconds with data", "Buffer seconds with data",
-               "Frames planned", "Measured", "Skipped", "Not yet marked"])
+               "Frames planned", "Marked", "Skipped", "Not marked", "Skipped for camera",
+               "Marked frames flagged by the camera check"])
     for line in info:
         ws.append(line)
     ws.append([])
-    ws.append([f"Video: {vid.get('name', '?')}, {index.n} frames, time base {vid.get('time_base', '?')}. "
-               "Video time zero = first frame; time_offset_s = video time minus force time."])
-    ws.append(["Distance (mm) = mean over measured frames. Distance SD mixes tissue motion, click noise and "
-               "timing ambiguity; see the header of merge_distance_force.py."])
+    ws.append([f"Video: {vid.get('name', index.source_name)}, {index.n} frames. Time base {index.tb_num}/{index.tb_den} s per tick; "
+               f"first frame pts {int(index.pts[0])}. time_s = (pts - first frame pts) x time base, so video time zero is the first frame; "
+               "time_offset_s = video time minus force time."])
+    ws.append(["The Frames sheet (and <case_id>_frame_distances.csv, the same table) is the product: one row per measured frame."])
+    ws.append(["The Summary sheets are derived from the Frames sheet: for each force second the mean, SD, N, min, max and median of "
+               "the marked frames' distances. The SD mixes tissue motion, click noise and timing ambiguity; it is not pure "
+               "measurement error."])
     ws.append(["Role column: window = between the noted start and end; buffer-before / buffer-after = in the buffer. "
-               "Buffer rows are measured and kept; fit_moduli.py --rows window leaves them out of the fits."])
+               "Buffer rows are measured and kept; filter the role column to leave them out."])
+    ws.append([f"Force: one column per logged arm (USM1 to USM4) as in the force log, blank where the log has no sample; "
+               f"{TOTAL} adds the arms and counts a blank arm as 0 N."])
+    ws.append(["scale_vs_calibration: the camera check (camera_check.py): the scene's scale on the frame relative to the point's "
+               "calibration frame. 1.00 = same zoom. A scale far from 1 means the pixel-to-millimetre scale of the point does not "
+               "apply to that frame."])
     for c in ws[2]:
         c.font = bold
 
@@ -218,9 +288,8 @@ def main(argv=None):
     os.replace(tmp, out_xlsx)
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["point", "force_second", "role", "frame", "time_s", "offset_frames", "offset_ms", "distance_mm",
-                    "distance_px", "left_x", "left_y", "right_x", "right_y", "px_per_mm", "status"])
-        w.writerows(csv_rows)
+        w.writerow(columns)
+        w.writerows(table)
     print(f"Saved: {out_xlsx}")
     print(f"Saved: {out_csv}")
 

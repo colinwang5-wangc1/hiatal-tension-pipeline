@@ -228,6 +228,21 @@ class TestHalfWindow(unittest.TestCase):
 
 
 class TestVersioning(unittest.TestCase):
+    def test_copies_of_the_scripts_without_the_VERSION_file_stop_with_a_clear_message(self):
+        import subprocess
+        import shutil
+        root = Path(fl.__file__).parent
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(root / "framelib.py", d)
+            r = subprocess.run([sys.executable, "-c", "import framelib"], cwd=d, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("VERSION", r.stderr)
+            self.assertIn("whole folder", r.stderr)
+            shutil.copy(root / "VERSION", d)
+            ok = subprocess.run([sys.executable, "-c", "import framelib; print(framelib.PIPELINE_VERSION)"],
+                                cwd=d, capture_output=True, text=True)
+            self.assertEqual(ok.stdout.strip(), (root / "VERSION").read_text().strip())
+
     def test_version_file_is_read(self):
         self.assertRegex(fl.PIPELINE_VERSION, r"^\d+\.\d+\.\d+$")
         self.assertEqual(fl.PIPELINE_VERSION, (Path(fl.__file__).parent / "VERSION").read_text().strip())

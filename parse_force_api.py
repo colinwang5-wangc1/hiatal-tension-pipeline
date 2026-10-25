@@ -115,7 +115,8 @@ def main(argv=None):
         cols = ["Timestamp", "Seconds", "Force (N)", "Arm", "Instrument", "Sensitivity"]
         df[cols].to_excel(xlsx_path, index=False)
         df[cols].to_csv(csv_path, index=False)
-        print(f"    Saved: {xlsx_path.name}")
+        print(f"    Saved: {xlsx_path}")
+        print(f"    Saved: {csv_path}")
 
         df["Arm"] = arm_name
         all_dfs.append(df[cols])

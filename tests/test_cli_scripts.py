@@ -26,13 +26,12 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip()
-ALL_SCRIPTS = ["add_timestamp", "calibrate_reference", "export_calibration_frame", "extract_point_forces",
-               "fit_moduli", "index_video", "mark_suture_entry", "measure_hiatal_position", "measure_suture",
-               "make_tracking_sheet", "merge_distance_force", "parse_force_api", "pick_calibration_frame",
-               "plan_measurements", "verify_force"]
-HELP_SCRIPTS = ["add_timestamp", "calibrate_reference", "export_calibration_frame", "make_tracking_sheet",
-                "measure_hiatal_position", "measure_suture", "parse_force_api", "pick_calibration_frame",
-                "verify_force"]
+ALL_SCRIPTS = ["add_timestamp", "calibrate_reference", "camera_check", "export_calibration_frame", "extract_point_forces",
+               "index_video", "mark_suture_entry", "measure_suture", "make_tracking_sheet",
+               "merge_distance_force", "parse_force_api", "pick_calibration_frame", "plan_measurements",
+               "verify_force"]
+HELP_SCRIPTS = ["add_timestamp", "calibrate_reference", "camera_check", "export_calibration_frame", "make_tracking_sheet",
+                "measure_suture", "parse_force_api", "pick_calibration_frame", "verify_force"]
 
 
 def run(script, *args, cwd):
@@ -110,11 +109,9 @@ class TestAddTimestamp(unittest.TestCase):
 class TestImageScripts(unittest.TestCase):
     def test_an_unreadable_image_is_an_error_not_a_traceback(self):
         with tempfile.TemporaryDirectory() as d:
-            cases = {"measure_suture": ["missing.png"],
-                     "measure_hiatal_position": ["missing.png", "case1"]}
+            cases = {"measure_suture": ["missing.png"]}
             for script, args in cases.items():
                 with self.subTest(script=script):
-                    (Path(d) / "Videos" / "case1" / "force_data").mkdir(parents=True, exist_ok=True)
                     r = run(script, *args, cwd=d)
                     self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                     self.assertNotIn("Traceback", r.stdout + r.stderr)
@@ -123,6 +120,18 @@ class TestImageScripts(unittest.TestCase):
 
 
 class TestParseForceApi(unittest.TestCase):
+    def test_it_names_every_file_it_writes_with_its_folder(self):
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "case1_force_raw.json").write_text(json.dumps({
+                "USM1": [{"x": 5, "y": 1.5, "z": {"sensitivity": "Medium", "instrument": "driver"}}, {"x": 6, "y": 0.0, "z": None}],
+                "USM2": [], "USM3": [], "USM4": []}))
+            r = run("parse_force_api", str(Path(d) / "case1_force_raw.json"), "case1", cwd=d)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            for name in ("case1_USM1_force.xlsx", "case1_USM1_force.csv", "case1_all_arms_force.xlsx"):
+                self.assertIn(str(Path(d) / name), r.stdout, name)
+
+
     def test_missing_input_is_still_an_error(self):
         with tempfile.TemporaryDirectory() as d:
             r = run("parse_force_api", str(Path(d) / "nope.json"), cwd=d)

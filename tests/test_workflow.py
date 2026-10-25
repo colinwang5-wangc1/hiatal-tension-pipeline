@@ -272,6 +272,17 @@ class TestPlanMeasurements(unittest.TestCase):
             self.assertIn(str(580 + 87), out)                          # total maximum frames
             self.assertIn("Frames used for two force seconds: 0", out)
 
+    def test_the_closing_hint_lists_the_next_steps_in_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_case(root)
+            _, out = self.plan(root, "--yes")
+            hint = out[out.index("Next:"):]
+            self.assertNotIn("<still>", hint)
+            order = [hint.index(s) for s in ("export_calibration_frame.py", "calibrate_reference.py",
+                                             "pick_calibration_frame.py", "mark_suture_entry.py")]
+            self.assertIn("ruler --time", hint)
+            self.assertEqual(order, sorted(order))                       # ruler frame, then each point's frame, then marking
+
     def test_per_point_and_single_stride_flags(self):
         with tempfile.TemporaryDirectory() as root:
             make_case(root)
@@ -408,18 +419,30 @@ class TestMarkerPlanHandling(unittest.TestCase):
             self.assertIn("largest allowed is 14 frames", str(cm.exception))
             self.assertIn("plan_measurements.py", str(cm.exception))
 
-    def test_a_plan_made_by_2_0_0_is_refused_until_it_is_remade(self):
+    def test_a_plan_made_by_another_major_version_is_refused_until_it_is_remade(self):
         with tempfile.TemporaryDirectory() as root:
             fdir, video = self.setup(root)
             path = fl.plan_path(fdir, CASE)
             old = json.loads(path.read_text())
-            old["pipeline_version"] = "2.0.0"
-            old["parameters"].update({"half_window_s": 0.5, "half_window_frames": 15, "layout": "edge"})
+            old["pipeline_version"] = "2.1.0"
+            path.write_text(json.dumps(old))
+            with self.assertRaises(SystemExit) as cm:
+                self.listing(video)
+            self.assertIn("different major version", str(cm.exception))
+            run_quiet(pm.main, [CASE, "--yes"])                         # re-planning fixes it
+            self.assertIn("offsets [-10 +0 +10]", self.listing(video))
+
+    def test_a_plan_with_a_half_window_of_15_frames_is_refused_until_it_is_remade(self):
+        with tempfile.TemporaryDirectory() as root:
+            fdir, video = self.setup(root)
+            path = fl.plan_path(fdir, CASE)
+            old = json.loads(path.read_text())
+            old["parameters"].update({"half_window_s": 0.5, "half_window_frames": 15})
             path.write_text(json.dumps(old))
             with self.assertRaises(SystemExit) as cm:
                 self.listing(video)
             self.assertIn("largest allowed is 14 frames", str(cm.exception))
-            run_quiet(pm.main, [CASE, "--yes"])                         # re-planning fixes it
+            run_quiet(pm.main, [CASE, "--yes"])
             self.assertIn("offsets [-10 +0 +10]", self.listing(video))
 
     def test_missing_plan_or_frame_table_stops_with_instructions(self):

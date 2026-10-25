@@ -1,4 +1,4 @@
-# Hiatal Tension Pipeline 2.1.0: Python dependencies
+# Hiatal Tension Pipeline 3.0.0: Python dependencies
 #
 # Needs Python 3.9 or newer (tested on 3.9, 3.10, 3.12 and 3.14). Install into a virtual environment:
 #     python3 -m venv .venv
@@ -11,11 +11,10 @@
 # No separate FFmpeg install is needed: PyAV bundles its own FFmpeg libraries.
 
 # --- Core: the main stages (index_video, extract_point_forces, plan_measurements, mark_suture_entry,
-#     merge_distance_force, fit_moduli) -------------------------------------------------------------
+#     merge_distance_force) -------------------------------------------------------------------------
 numpy>=2.0        # arrays and statistics: every stage
-openpyxl>=3.1     # reads and writes the Excel workbooks: extract_point_forces, plan_measurements, merge_distance_force, fit_moduli, calibrate_reference
-scipy>=1.13        # curve fitting: fit_moduli
-matplotlib>=3.9   # the interactive windows and the plots: mark_suture_entry, calibrate_reference, measure_hiatal_position, measure_suture, fit_moduli
+openpyxl>=3.1     # reads and writes the Excel workbooks: extract_point_forces, plan_measurements, merge_distance_force, make_tracking_sheet
+matplotlib>=3.9   # the interactive windows: mark_suture_entry, calibrate_reference, pick_calibration_frame, measure_suture
 
 # --- Video: reads the original video exactly, frame by frame ------------------------------------------
 av>=15           # PyAV (bundles FFmpeg libraries): index_video, mark_suture_entry, export_calibration_frame, pick_calibration_frame
@@ -24,7 +23,7 @@ av>=15           # PyAV (bundles FFmpeg libraries): index_video, mark_suture_ent
 pillow>=11.3      # lossless PNG of an exact frame: export_calibration_frame, pick_calibration_frame (matplotlib already needs it)
 
 # --- Calibration and image tools -----------------------------------------------------------------------
-opencv-python>=5.0  # image reading: calibrate_reference, measure_hiatal_position, measure_suture, add_timestamp, verify_force
+opencv-python>=5.0  # image reading and feature matching: calibrate_reference, camera_check, measure_suture, add_timestamp, verify_force
 
 # --- Force log parsing ---------------------------------------------------------------------------------
 pandas>=2.3       # parse_force_api (and verify_force)

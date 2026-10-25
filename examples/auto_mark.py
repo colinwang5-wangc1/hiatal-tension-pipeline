@@ -4,8 +4,9 @@ auto_mark.py — A stand-in for the operator, for trying the pipeline on the syn
 mark_suture_entry.py needs a person to click the left and right crus entry points on every planned frame.
 This script does the same job for the sample case, where the "entry points" are two bright dots: it decodes
 each planned frame, finds the two dots, and records the marks through exactly the same code the interactive
-tool uses (MarkSession: same plan, same frame table, same storage, same checksums). Use it ONLY on the
-sample case. It cannot mark real endoscope images.
+tool uses (MarkSession: same plan, same frame table, same storage, same checksums). It also runs the camera
+check and, like an operator accepting its suggestions, skips the frames the check flags for a scale change
+(reason "camera: scale x.xx vs calibration"). Use it ONLY on the sample case. It cannot mark real endoscope images.
 
 Usage:
     python3 examples/auto_mark.py <video.mp4> <case_id> <point>
@@ -50,25 +51,32 @@ def main(argv=None):
         sys.exit(f"ERROR: video not found: {video}")
 
     index, store, params, plan, roles = ms.prepare(video, args.case_id, label)
-    px_per_mm = ms.load_px_per_mm(args.case_id, label)
+    calibration = ms.load_calibration(args.case_id, label)
+    px_per_mm = calibration["px_per_mm"]
     store.set_video(index)
     store.note_params(label, params)
     store.save()
 
-    n = 0
+    n = camera_skips = 0
     with fl.FrameReader(video, index) as reader:
-        session = ms.MarkSession(store, label, plan, px_per_mm, index, get_frame=reader.get, roles=roles)
+        check = ms.ensure_camera_check(reader, store, label, plan, calibration)
+        session = ms.MarkSession(store, label, plan, px_per_mm, index, get_frame=reader.get, roles=roles,
+                                 calibration_frame=calibration["frame"], check=check)
         for pos in range(len(session.order)):
             session.pos, session.clicks = pos, []
-            if session.is_marked():
+            if session.record() is not None:
+                continue
+            if session.camera_flag() == "scale":          # the operator accepts the suggestion: x, then Enter
+                session.skip(session.camera_reason())
+                camera_skips += 1
                 continue
             (lx, ly), (rx, ry) = detect_dots(reader.get(session.order[pos]))
             session.click(lx, ly)
             session.click(rx, ry)
             n += 1
     marked, skipped, remaining = store.counts(label, plan.frames)
-    print(f"Point {label}: marked {n} new frames ({marked} marked, {skipped} skipped, {remaining} not yet marked "
-          f"of {len(plan.frames)}) at {px_per_mm:g} px/mm")
+    print(f"Point {label}: marked {n} new frames, skipped {camera_skips} for the camera ({marked} marked, {skipped} "
+          f"skipped, {remaining} not yet marked of {len(plan.frames)}) at {px_per_mm:g} px/mm")
 
 
 if __name__ == "__main__":
